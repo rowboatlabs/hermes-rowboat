@@ -89,6 +89,7 @@ Rowboat decides when the agent is invoked (a mention), holds a queue per thread,
 - **The answer is a message in the thread**, as the agent. Hermes's edits are edits.
 - **Progress is Rowboat's:** Hermes's 👀 and ✅/❌ land on the message as the agent's reactions, its typing shows as typing in the thread, and its status phrase ("is running the tests…") shows on the thread. The invocation ends when Hermes releases the thread's session.
 - **Stop in Rowboat is Hermes's own `/stop`.**
+- **Restarts don't strand a thread.** A turn Hermes resumes after a restart is followed to its answer; one it can't resume is reported failed as soon as Hermes is back, so the next mention in that thread isn't held up.
 
 ## Security
 
