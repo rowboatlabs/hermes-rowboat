@@ -21,6 +21,7 @@ class FakeRowboat:
 
     def __init__(self):
         self.calls = []
+        self.listed = []
         self.thread = {
             "root": {"id": ROOT, "author": {"memberId": "ram"}, "body": "Deploy is at 3pm"},
             "messages": [
@@ -41,7 +42,7 @@ class FakeRowboat:
         if path.endswith(f"/threads/{ROOT}"):
             return httpx.Response(200, json=self.thread)
         if path == "/v1/agent/invocations":
-            return httpx.Response(200, json={"invocations": []})
+            return httpx.Response(200, json={"invocations": self.listed})
         if path.endswith("/messages") and request.method == "POST":
             return httpx.Response(200, json={"message": {"id": "R1"}, "invocations": []})
         if path == "/v1/spaces":
@@ -231,6 +232,50 @@ async def test_the_session_release_reports_the_outcome(adapter, api, outcome, re
     update = [b for m, p, b in api.calls if p == "/v1/agent/invocations/INV1/update"]
     assert update == [expected]
     assert key not in adapter._turns and api.paths("GET")[-1] == "/v1/agent/invocations"  # the next queued one
+
+
+def updates(api, inv_id="INV1"):
+    return [b for m, p, b in api.calls if p == f"/v1/agent/invocations/{inv_id}/update"]
+
+
+@pytest.mark.parametrize(
+    ("body", "resumed", "expected"),
+    [
+        # Hermes resumed the interrupted turn in the thread's session and answered.
+        ("[@Hermes](#member:AG1) plan?", True, {"state": "done"}),
+        # Nothing resumed it: lost with the restart, and the thread is freed now, not in 30 minutes.
+        ("[@Hermes](#member:AG1) plan?", False, {"state": "failed", "error": "Hermes restarted before finishing this"}),
+        # The owner's /restart: the restart was the point.
+        ("[@Hermes](#member:AG1) /restart", False, {"state": "done"}),
+    ],
+)
+async def test_after_a_restart_it_settles_what_the_previous_run_acknowledged(adapter, api, monkeypatch, body, resumed, expected):
+    api.listed = [invocation(state="working", trigger={"messageId": TRIGGER, "authorId": "ram", "body": body})]
+    gate = asyncio.Event()  # Hermes's startup restore, during which it resumes interrupted turns
+    monkeypatch.setattr(adapter, "_startup_gate", gate.wait)
+    adapter._adopting = True
+    await adapter._list()
+    assert adapter.handled == [] and "/v1/agent/invocations/INV1/ack" not in api.paths()  # followed, not re-run
+    key = next(iter(adapter._turns))
+    if resumed:
+        adapter._active_sessions[key] = asyncio.Event()
+        await adapter.send(f"{SPACE}/{ROOT}", "Here's the plan")
+    gate.set()
+    await asyncio.sleep(0.3)
+    adapter._active_sessions.pop(key, None)
+    await asyncio.wait_for(asyncio.gather(*list(adapter._tasks)), 2)
+    assert updates(api) == [expected]
+
+
+async def test_only_the_first_list_adopts_and_never_a_turn_it_holds(adapter, api):
+    await adapter._deliver(invocation())  # this run's own turn, now working
+    api.listed = [invocation(state="working"), invocation(id="INV2", state="working", conversation={"spaceId": SPACE, "threadRootId": "M9"})]
+    adapter._adopting = True
+    await adapter._list()
+    assert sorted(adapter._by_invocation) == ["INV1", "INV2"]  # INV2 adopted; INV1 still the one delivered
+    adapter._turns.clear(), adapter._by_invocation.clear()
+    await adapter._list()  # a later list is not a restart
+    assert adapter._by_invocation == {}
 
 
 async def test_reactions_are_mirrored_on_the_mention(adapter, api):

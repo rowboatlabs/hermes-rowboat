@@ -88,6 +88,8 @@ class _Turn:
     activity: Optional[str] = None
     typing_at: float = 0.0
     reported_at: float = field(default_factory=time.monotonic)
+    # Acknowledged by this agent's previous run, which Hermes restarted under.
+    adopted: bool = False
 
 
 class RowboatAdapter(BasePlatformAdapter):
@@ -118,6 +120,7 @@ class RowboatAdapter(BasePlatformAdapter):
         self._spaces: Dict[str, Dict[str, Any]] = {}
         self._turns: Dict[str, _Turn] = {}  # session key → the turn Hermes is running there
         self._by_invocation: Dict[str, str] = {}  # invocation id → session key
+        self._adopting = False
         self._typing: set[str] = set()  # chats shown as typing, so idle is sent once
         # Invocations can arrive twice (the live frame and the minute's list); the shared deduplicator
         # also carries its ids over when Hermes swaps in a fresh adapter on reconnect.
@@ -160,6 +163,8 @@ class RowboatAdapter(BasePlatformAdapter):
             return self._fail("not_an_agent", "ROWBOAT_AGENT_KEY is not an agent key", retryable=False)
         # Spaces may offer Stop: Hermes's own /stop cancels a running turn (see _stop).
         await self._api("POST", "/v1/agent/capabilities", {"stop": True, "options": []})
+        # The first list after a start also picks up what a previous run acknowledged and never finished.
+        self._adopting = True
         self._live_task = asyncio.create_task(self._live_loop())
         self._list_task = asyncio.create_task(self._list_loop())
         self._mark_connected()
@@ -235,8 +240,14 @@ class RowboatAdapter(BasePlatformAdapter):
 
     async def _list(self) -> None:
         listed = await self._api("GET", "/v1/agent/invocations")
-        for invocation in (listed or {}).get("invocations", []):
-            await self._deliver(invocation)
+        if listed is None:
+            return
+        adopting, self._adopting = self._adopting, False
+        for invocation in listed.get("invocations", []):
+            if invocation.get("state") == "pending":
+                await self._deliver(invocation)
+            elif adopting and str(invocation.get("id") or "") not in self._by_invocation:
+                await self._adopt(invocation)
 
     async def _on_frame(self, frame: dict) -> None:
         kind = frame.get("kind")
@@ -262,22 +273,9 @@ class RowboatAdapter(BasePlatformAdapter):
             if invocation.get("state") != "pending" or not inv_id or self._dedup.contains(inv_id):
                 return
             await self._startup_gate()
-            conversation = invocation.get("conversation") or {}
             trigger = invocation.get("trigger") or {}
-            where = invocation.get("where") or {}
-            space, root = str(conversation.get("spaceId")), str(conversation.get("threadRootId"))
-            chat_id = f"{space}/{root}"
-            direct = where.get("spaceKind") == "direct"
             author = str(trigger.get("authorId") or "")
-            source = self.build_source(
-                chat_id=chat_id,
-                chat_name=None if direct else where.get("spaceName"),
-                chat_type="dm" if direct else "group",
-                user_id=author,
-                user_name=await self._name(author),
-                thread_id=root,
-                message_id=str(trigger.get("messageId") or ""),
-            )
+            space, root, chat_id, source = await self._where(invocation)
             key = self._source_session_key(source)
             if key in self._turns or key in self._active_sessions:
                 return  # its thread is busy here; Spaces holds it pending, the next list delivers it
@@ -303,13 +301,52 @@ class RowboatAdapter(BasePlatformAdapter):
             await self.handle_message(event)
             self._spawn(self._watch(key, turn))
 
+    async def _where(self, invocation: dict) -> tuple:
+        conversation = invocation.get("conversation") or {}
+        trigger = invocation.get("trigger") or {}
+        where = invocation.get("where") or {}
+        space, root = str(conversation.get("spaceId")), str(conversation.get("threadRootId"))
+        chat_id = f"{space}/{root}"
+        direct = where.get("spaceKind") == "direct"
+        author = str(trigger.get("authorId") or "")
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_name=None if direct else where.get("spaceName"),
+            chat_type="dm" if direct else "group",
+            user_id=author,
+            user_name=await self._name(author),
+            thread_id=root,
+            message_id=str(trigger.get("messageId") or ""),
+        )
+        return space, root, chat_id, source
+
+    async def _adopt(self, invocation: dict) -> None:
+        """A turn the previous run acknowledged (spec §8: a restarted connector settles these). Hermes
+        resumes a fresh interrupted turn in its session by itself, so follow the session as for any turn:
+        a reply means done, silence means it was lost, and saying so at once frees the thread instead of
+        leaving it behind Spaces' 30-minute silence rule. A /restart is done: the restart was the point."""
+        inv_id = str(invocation.get("id") or "")
+        trigger = invocation.get("trigger") or {}
+        _, _, chat_id, source = await self._where(invocation)
+        key = self._source_session_key(source)
+        if not inv_id or key in self._turns:
+            return
+        turn = _Turn(invocation_id=inv_id, message_id=str(trigger.get("messageId") or ""), chat_id=chat_id, source=source, adopted=True)
+        if _plain(str(trigger.get("body") or ""), str(self._me.get("id") or "")).split()[:1] == ["/restart"]:
+            turn.outcome = ProcessingOutcome.SUCCESS
+        self._turns[key] = turn
+        self._by_invocation[inv_id] = key
+        self._spawn(self._watch(key, turn))
+
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _watch(self, key: str, turn: _Turn) -> None:
-        """The turn is over when Hermes releases the thread's session (no hook fires after that)."""
+        """The turn is over when Hermes releases the thread's session (no hook fires after that).
+        Resumed turns run while the startup gate is closed, so an adopted one is judged after it."""
+        await self._startup_gate()
         await asyncio.sleep(0.2)
         while key in self._active_sessions:
             await asyncio.sleep(0.5)
@@ -318,7 +355,6 @@ class RowboatAdapter(BasePlatformAdapter):
     async def _finish(self, key: str, turn: _Turn) -> None:
         if self._turns.get(key) is turn:
             del self._turns[key]
-        self._by_invocation.pop(turn.invocation_id, None)
         await self._idle(turn.chat_id)
         if turn.outcome == ProcessingOutcome.CANCELLED:
             update = {"state": "cancelled"}
@@ -326,9 +362,13 @@ class RowboatAdapter(BasePlatformAdapter):
             update = {"state": "failed", "error": "Hermes could not finish this turn"}
         elif turn.outcome == ProcessingOutcome.SUCCESS or turn.replied:
             update = {"state": "done"}
+        elif turn.adopted:
+            update = {"state": "failed", "error": "Hermes restarted before finishing this"}
         else:
             update = {"state": "failed", "error": "Hermes did not take the message"}
         await self._api("POST", f"/v1/agent/invocations/{turn.invocation_id}/update", update, quiet=False)
+        # Held until reported, so a list in between never takes it for a previous run's.
+        self._by_invocation.pop(turn.invocation_id, None)
         # The thread is free: anything queued behind this turn is pending in Spaces now.
         await self._list()
 
