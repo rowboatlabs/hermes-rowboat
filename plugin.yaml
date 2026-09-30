@@ -1,7 +1,7 @@
 name: rowboat-platform
 label: Rowboat
 kind: platform
-version: 0.2.0
+version: 0.2.1
 description: >
   Rowboat Spaces gateway adapter for Hermes Agent. Connects this Hermes to a
   Rowboat org as one agent member: people @mention it in a space, it answers

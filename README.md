@@ -8,24 +8,35 @@ It follows Hermes's guide for [adding a platform adapter](https://hermes-agent.n
 
 In Rowboat, open **Agents → Add agent → Hermes**. It creates the agent and shows these steps with your values filled in.
 
-**Ask Hermes to do it** (recommended)
+1. **Save the Rowboat settings.** Run these in a terminal where Hermes runs:
 
-1. Give Hermes the agent's key, outside the chat: `hermes config set ROWBOAT_AGENT_KEY 'rbk_…'` in a terminal where Hermes runs, or `ROWBOAT_AGENT_KEY` on the Hermes dashboard's Keys page.
-2. Send your Hermes this, with your values:
+   ```sh
+   hermes config set ROWBOAT_URL 'https://acme.rowboatlabs.com'
+   hermes config set ROWBOAT_AGENT_KEY 'rbk_…'
+   hermes config set ROWBOAT_HOME_CHANNEL '01M…'
+   ```
 
-   > Connect yourself to Rowboat: read https://raw.githubusercontent.com/rowboatlabs/hermes-rowboat/v0.2.0/SETUP.md and follow it. Rowboat address: https://acme.rowboatlabs.com. Home channel: 01M…. Your key is already in ROWBOAT_AGENT_KEY.
+   On hosted Hermes, add the same three on the dashboard's **Keys** page instead.
 
-   [SETUP.md](SETUP.md) is written for the agent: it saves the settings below, installs this plugin, checks the result, and never handles the key itself.
-3. When it says it's done, send `/restart` (or restart the gateway).
+2. **Send your Hermes this message:**
 
-If Hermes can't, do the same by hand:
+   ```text
+   Connect yourself to Rowboat: read https://raw.githubusercontent.com/rowboatlabs/hermes-rowboat/main/SETUP.md and follow it.
+   ```
 
-**From a terminal where Hermes runs**
+   It saves the rest of the settings, installs this plugin, and tells you when it's done. ([SETUP.md](SETUP.md) is what it reads.)
+
+3. **Restart it:** send `/restart`, or press **Restart Gateway** on the dashboard.
+
+4. **In Rowboat, add the agent to a space** and mention it.
+
+### If Hermes can't do it
+
+Do the same by hand, then continue from step 3.
+
+**In a terminal where Hermes runs:**
 
 ```sh
-hermes config set ROWBOAT_URL 'https://acme.rowboatlabs.com'
-hermes config set ROWBOAT_AGENT_KEY 'rbk_…'
-hermes config set ROWBOAT_HOME_CHANNEL '<the id Rowboat shows>'
 hermes config set ROWBOAT_ALLOW_ALL_USERS true
 hermes config set ROWBOAT_OWNER_COMMANDS true
 hermes config set mcp_servers.rowboat.url '${ROWBOAT_URL}/mcp'
@@ -35,18 +46,25 @@ hermes config set display.platforms.rowboat.show_reasoning false
 hermes config set display.platforms.rowboat.long_running_notifications false
 hermes config set display.platforms.rowboat.busy_ack_detail false
 hermes plugins install rowboatlabs/hermes-rowboat --enable
-hermes gateway restart
 ```
 
-**From the Hermes dashboard** (hosted Hermes, or no terminal)
+**Or on the Hermes dashboard:**
 
 1. **Plugins → Install from GitHub:** `rowboatlabs/hermes-rowboat`, with *Enable after install* on.
-2. **Channels → Rowboat:** fill in `ROWBOAT_URL`, `ROWBOAT_AGENT_KEY`, `ROWBOAT_HOME_CHANNEL`, `ROWBOAT_ALLOW_ALL_USERS` = `true` and `ROWBOAT_OWNER_COMMANDS` = `true`, and turn the channel on. (Once the plugin is installed, its settings live on this card; the Keys page hides them.)
-3. **MCP → Add server:** name `rowboat`, URL `<ROWBOAT_URL>/mcp`, auth *Bearer token* = the agent key.
-4. **Config** (YAML mode): under the existing `display:`, add `platforms:` → `rowboat:` with `tool_progress: 'off'`, `show_reasoning: false`, `long_running_notifications: false`, `busy_ack_detail: false`.
-5. **Restart Gateway.**
+2. **Channels → Rowboat:** set `ROWBOAT_ALLOW_ALL_USERS` and `ROWBOAT_OWNER_COMMANDS` to `true`, and turn the channel on. (The plugin's settings, the three from step 1 included, live on this card from now on; the Keys page hides them.)
+3. **MCP → Add server:** name `rowboat`, URL `<your ROWBOAT_URL>/mcp`, auth *Bearer token* = the agent key.
+4. **Config** (YAML mode): under the existing `display:`, add:
 
-Then add the agent to a space in Rowboat and mention it.
+   ```yaml
+     platforms:
+       rowboat:
+         tool_progress: 'off'
+         show_reasoning: false
+         long_running_notifications: false
+         busy_ack_detail: false
+   ```
+
+**Or with the setup wizard:** `hermes gateway setup`, then choose Rowboat. It asks for the three settings and saves the rest.
 
 ## Settings
 
@@ -79,8 +97,6 @@ Anyone allowed to talk to the agent can make your Hermes act with its tools, on 
 ## Not yet
 
 Media (images and files in either direction), Hermes's approval and clarify buttons (they fall back to text), and invocation options.
-
-Or run `hermes gateway setup` and choose Rowboat: the wizard asks for the address, the key and the home channel, and saves the rest.
 
 ## Development
 

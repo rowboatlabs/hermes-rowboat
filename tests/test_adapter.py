@@ -320,6 +320,9 @@ def test_setup_md_saves_what_the_wizard_saves():
     doc = (pathlib.Path(mod.__file__).parent / "SETUP.md").read_text()
     for key, value in mod._SETUP_CONFIG:
         assert f"hermes config set {key} '{value}'" in doc or f"hermes config set {key} {value}" in doc, key
-    for key in ("ROWBOAT_URL", "ROWBOAT_HOME_CHANNEL", "ROWBOAT_ALLOW_ALL_USERS", "ROWBOAT_OWNER_COMMANDS"):
-        assert f"hermes config set {key} " in doc, key
+    for key in ("ROWBOAT_ALLOW_ALL_USERS", "ROWBOAT_OWNER_COMMANDS"):
+        assert f"hermes config set {key} true" in doc, key
+    # What the person saves before sending the message, and the agent only checks.
+    for key in ("ROWBOAT_URL", "ROWBOAT_AGENT_KEY"):
+        assert f"hermes config get {key}" in doc, key
     assert "hermes plugins install rowboatlabs/hermes-rowboat --enable" in doc
