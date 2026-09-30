@@ -267,6 +267,27 @@ async def test_after_a_restart_it_settles_what_the_previous_run_acknowledged(ada
     assert updates(api) == [expected]
 
 
+async def test_the_startup_gate_finds_the_runner_behind_hermess_wrapped_handler(adapter):
+    class Runner:
+        _startup_restore_in_progress = True
+
+        async def _handle_adapter_fatal_error(self, adapter):
+            pass
+
+    runner = Runner()
+
+    async def wrapped(*args):  # what Hermes installs as the message handler: no __self__
+        pass
+
+    adapter._message_handler, adapter._fatal_error_handler = wrapped, runner._handle_adapter_fatal_error
+    assert adapter._runner() is runner
+    gate = asyncio.create_task(adapter._startup_gate())
+    await asyncio.sleep(0.6)
+    assert not gate.done()  # held while Hermes restores
+    runner._startup_restore_in_progress = False
+    await asyncio.wait_for(gate, 2)
+
+
 async def test_only_the_first_list_adopts_and_never_a_turn_it_holds(adapter, api):
     await adapter._deliver(invocation())  # this run's own turn, now working
     api.listed = [invocation(state="working"), invocation(id="INV2", state="working", conversation={"spaceId": SPACE, "threadRootId": "M9"})]

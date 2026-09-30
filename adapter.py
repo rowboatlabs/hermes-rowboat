@@ -258,10 +258,20 @@ class RowboatAdapter(BasePlatformAdapter):
 
     # --- invocations in -----------------------------------------------------------
 
+    def _runner(self) -> Any:
+        """The gateway runner, for its startup-restore flag. Hermes wraps the message handler it
+        installs (so it has no __self__) but installs the fatal-error handler as a bound method."""
+        for handler in (getattr(self, "_fatal_error_handler", None), getattr(self, "_message_handler", None)):
+            runner = getattr(handler, "__self__", None)
+            if runner is not None and hasattr(runner, "_startup_restore_in_progress"):
+                return runner
+        return None
+
     async def _startup_gate(self) -> None:
-        """Hermes queues what arrives while it restores sessions at startup and replays it later;
-        a turn delivered into that window would read as finished before it ran."""
-        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        """Hermes queues what arrives while it restores sessions at startup and replays it later,
+        and resumes the turns a restart interrupted meanwhile: a turn delivered into that window
+        would read as finished before it ran, and an adopted one as lost before it resumed."""
+        runner = self._runner()
         for _ in range(240):
             if not getattr(runner, "_startup_restore_in_progress", False):
                 return
