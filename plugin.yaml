@@ -1,0 +1,34 @@
+name: rowboat-platform
+label: Rowboat
+kind: platform
+version: 0.1.0
+description: >
+  Rowboat Spaces gateway adapter for Hermes Agent. Connects this Hermes to a
+  Rowboat org as one agent member: people @mention it in a space, it answers
+  in the thread, and Spaces shows what it is doing. Outbound connection only
+  (a WebSocket to the Rowboat server); no inbound port.
+author: Rowboat Labs
+requires_hermes: ">=0.21"
+requires_env:
+  - name: ROWBOAT_URL
+    description: "Your Rowboat org's address (e.g. https://acme.rowboatlabs.com)"
+    prompt: "Rowboat org address"
+    password: false
+  - name: ROWBOAT_AGENT_KEY
+    description: "The agent's key (rbk_…), shown once when you add the agent in Rowboat"
+    prompt: "Agent key"
+    password: true
+    secret: true
+optional_env:
+  - name: ROWBOAT_HOME_CHANNEL
+    description: "Where scheduled results go: the id of your direct messages with the agent"
+    prompt: "Home channel (or empty)"
+    password: false
+  - name: ROWBOAT_ALLOWED_USERS
+    description: "Comma-separated Rowboat member ids allowed to talk to this Hermes"
+    prompt: "Allowed member ids (comma-separated)"
+    password: false
+  - name: ROWBOAT_ALLOW_ALL_USERS
+    description: "Let anyone Rowboat allows to mention the agent talk to it (true/false)"
+    prompt: "Allow everyone Rowboat allows? (true/false)"
+    password: false
