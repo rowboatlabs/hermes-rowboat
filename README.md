@@ -15,9 +15,13 @@ hermes config set ROWBOAT_URL 'https://acme.rowboatlabs.com'
 hermes config set ROWBOAT_AGENT_KEY 'rbk_…'
 hermes config set ROWBOAT_HOME_CHANNEL '<the id Rowboat shows>'
 hermes config set ROWBOAT_ALLOW_ALL_USERS true
+hermes config set ROWBOAT_OWNER_COMMANDS true
 hermes config set mcp_servers.rowboat.url '${ROWBOAT_URL}/mcp'
 hermes config set mcp_servers.rowboat.headers.Authorization 'Bearer ${ROWBOAT_AGENT_KEY}'
 hermes config set display.platforms.rowboat.tool_progress off
+hermes config set display.platforms.rowboat.show_reasoning false
+hermes config set display.platforms.rowboat.long_running_notifications false
+hermes config set display.platforms.rowboat.busy_ack_detail false
 hermes plugins install rowboatlabs/hermes-rowboat --enable
 hermes gateway restart
 ```
@@ -25,9 +29,9 @@ hermes gateway restart
 **From the Hermes dashboard** (hosted Hermes, or no terminal)
 
 1. **Plugins → Install from GitHub:** `rowboatlabs/hermes-rowboat`, with *Enable after install* on.
-2. **Keys:** add `ROWBOAT_URL`, `ROWBOAT_AGENT_KEY`, `ROWBOAT_HOME_CHANNEL`, and `ROWBOAT_ALLOW_ALL_USERS` = `true`.
+2. **Channels → Rowboat:** fill in `ROWBOAT_URL`, `ROWBOAT_AGENT_KEY`, `ROWBOAT_HOME_CHANNEL`, `ROWBOAT_ALLOW_ALL_USERS` = `true` and `ROWBOAT_OWNER_COMMANDS` = `true`, and turn the channel on. (Once the plugin is installed, its settings live on this card; the Keys page hides them.)
 3. **MCP → Add server:** name `rowboat`, URL `<ROWBOAT_URL>/mcp`, auth *Bearer token* = the agent key.
-4. **Config** (YAML mode): under the existing `display:`, add `platforms:` → `rowboat:` → `tool_progress: 'off'`.
+4. **Config** (YAML mode): under the existing `display:`, add `platforms:` → `rowboat:` with `tool_progress: 'off'`, `show_reasoning: false`, `long_running_notifications: false`, `busy_ack_detail: false`.
 5. **Restart Gateway.**
 
 Then add the agent to a space in Rowboat and mention it.
@@ -41,8 +45,9 @@ Then add the agent to a space in Rowboat and mention it.
 | `ROWBOAT_HOME_CHANNEL` | Optional. Where Hermes sends what has no conversation of its own, such as a scheduled job's result. Rowboat sets it to your direct messages with the agent. Unset, Hermes asks for a home at the start of every new thread. |
 | `ROWBOAT_ALLOW_ALL_USERS` | `true`: anyone Rowboat lets mention the agent may talk to it. Rowboat's own rule is anyone who shares a space with the agent. |
 | `ROWBOAT_ALLOWED_USERS` | Optional, instead of the above: comma-separated Rowboat member ids allowed to talk to it. |
+| `ROWBOAT_OWNER_COMMANDS` | `true`: the agent's owner can run Hermes commands from Rowboat by mentioning it (`@Hermes /reload-mcp`, `/sethome`, `/model`, …). Off by default; nobody else can, ever. |
 
-The `mcp_servers.rowboat` entry gives Hermes the Spaces tools (read threads, search, post, files, …) on the same key. `display.platforms.rowboat.tool_progress off` keeps Hermes's tool-progress messages out of threads; Rowboat shows the current step on the thread instead.
+The `mcp_servers.rowboat` entry gives Hermes the Spaces tools (read threads, search, post, files, …) on the same key. The `display.platforms.rowboat` settings give Rowboat the quiet defaults Hermes uses for Slack: no tool-progress messages (Rowboat shows the current step on the thread instead), no reasoning blocks, and no long-running or busy notices. Hermes's in-between messages still post, as they do in Slack.
 
 One Hermes profile is one Rowboat agent. The same agent can be added to any number of spaces in its org. To connect one Hermes to a second org, give that org its own Hermes [profile](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) with its own agent key; two profiles on one key are refused.
 
@@ -57,7 +62,7 @@ Rowboat decides when the agent is invoked (a mention), holds a queue per thread,
 
 ## Security
 
-Anyone allowed to talk to the agent can make your Hermes act with its tools, on the machine it runs on. Choose who with `ROWBOAT_ALLOW_ALL_USERS` or `ROWBOAT_ALLOWED_USERS`, and consider a dedicated Hermes profile with restricted `platform_toolsets.rowboat` for a shared space. Messages from Rowboat can't run Hermes commands (`/model`, `/reset`, `/approve`, …): commands that need approval can't be approved from a space.
+Anyone allowed to talk to the agent can make your Hermes act with its tools, on the machine it runs on. Choose who with `ROWBOAT_ALLOW_ALL_USERS` or `ROWBOAT_ALLOWED_USERS`, and consider a dedicated Hermes profile with restricted `platform_toolsets.rowboat` for a shared space. Hermes commands (`/model`, `/reset`, `/approve`, …) run from Rowboat only for the agent's owner, and only with `ROWBOAT_OWNER_COMMANDS` on: nobody else can change your Hermes, or approve what it asks approval for, from a space.
 
 ## Not yet
 

@@ -14,6 +14,8 @@ while Hermes answers in the thread as the agent.
 - Who may talk to this Hermes is Hermes's own per-platform rule
   (ROWBOAT_ALLOWED_USERS: Rowboat member ids; ROWBOAT_ALLOW_ALL_USERS: anyone
   Spaces lets invoke the agent), on top of Spaces' rule for who may invoke it.
+  Hermes commands (/model, /reload-mcp, …) are never run from Spaces, except
+  for the agent's owner when ROWBOAT_OWNER_COMMANDS is on.
 - What Hermes does that Spaces also has is done in Spaces too: its 👀/✅/❌
   land on the message as the agent's reactions, its typing is typing in the
   thread, its status phrase is the invocation's activity line.
@@ -22,7 +24,8 @@ while Hermes answers in the thread as the agent.
 Settings (env, or ``platforms.rowboat.extra``): ROWBOAT_URL (the org's
 address), ROWBOAT_AGENT_KEY (the agent's key), ROWBOAT_HOME_CHANNEL
 (optional: where scheduled results go), ROWBOAT_ALLOWED_USERS /
-ROWBOAT_ALLOW_ALL_USERS (who may talk to it).
+ROWBOAT_ALLOW_ALL_USERS (who may talk to it), ROWBOAT_OWNER_COMMANDS (the
+owner may run Hermes commands from Spaces).
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ TYPING_EVERY_S = 10.0
 # Report `working` at least this often so Spaces' 30-minute silence rule never fails a live turn.
 HEARTBEAT_EVERY_S = 300.0
 MAX_MESSAGE_LENGTH = 16_000
+_TRUTHY = {"1", "true", "yes", "on"}
 _TOKEN = re.compile(r"\[([^\]]*)\]\(#([a-z]+)(?::([^)\s]+))?\)")
 
 
@@ -103,6 +107,8 @@ class RowboatAdapter(BasePlatformAdapter):
         # Explicit env (profile-scoped) → this profile's config.extra → default (the guide's rule).
         self.base_url = (extra_or_secret(extra, "url", "ROWBOAT_URL") or "").strip().rstrip("/")
         self.agent_key = (extra_or_secret(extra, "agent_key", "ROWBOAT_AGENT_KEY") or "").strip()
+        # Off unless asked for: people who can mention the agent are not its owner.
+        self.owner_commands = str(extra_or_secret(extra, "owner_commands", "ROWBOAT_OWNER_COMMANDS") or "").strip().lower() in _TRUTHY
         self._http = None
         self._ws = None
         self._live_task: Optional[asyncio.Task] = None
@@ -290,8 +296,8 @@ class RowboatAdapter(BasePlatformAdapter):
                 source=source,
                 message_id=turn.message_id,
                 channel_context=await self._thread_context(space, root, turn.message_id),
-                # People who can mention the agent are not its owner: no /model, /reset, … from Spaces.
-                allow_gateway_control=False,
+                # Hermes commands only from the agent's owner, and only when the owner turned them on.
+                allow_gateway_control=self.owner_commands and bool(author) and author == self._me.get("ownerId"),
                 metadata={"rowboat_invocation": inv_id},
             )
             await self.handle_message(event)

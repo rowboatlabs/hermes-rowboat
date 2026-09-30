@@ -32,3 +32,7 @@ optional_env:
     description: "Let anyone Rowboat allows to mention the agent talk to it (true/false)"
     prompt: "Allow everyone Rowboat allows? (true/false)"
     password: false
+  - name: ROWBOAT_OWNER_COMMANDS
+    description: "Let the agent's owner run Hermes commands (/reload-mcp, /model, …) from Rowboat; nobody else ever can (true/false)"
+    prompt: "Allow the owner's commands from Rowboat? (true/false)"
+    password: false

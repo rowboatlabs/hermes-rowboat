@@ -12,7 +12,7 @@ from gateway.platforms.event import MessageType, ProcessingOutcome
 
 from rowboat_platform import adapter as mod
 
-AGENT = {"id": "AG1", "displayName": "Hermes", "kind": "agent"}
+AGENT = {"id": "AG1", "displayName": "Hermes", "kind": "agent", "ownerId": "ram"}
 SPACE, ROOT, TRIGGER = "SP1", "M1", "M3"
 
 
@@ -146,6 +146,24 @@ async def test_an_invocation_becomes_one_turn_in_the_threads_session(adapter, ap
     # What the thread said before the mention, since the agent last spoke (it never has here).
     assert event.channel_context == "[Earlier in this thread]\nRamnique: Deploy is at 3pm\nHarsh: Migration first"
     assert ("POST", "/v1/agent/invocations/INV1/ack") in [(m, p) for m, p, _ in api.calls]
+
+
+@pytest.mark.parametrize(
+    ("flag", "author", "allowed"),
+    [(True, "ram", True), (True, "harsh", False), (False, "ram", False)],
+)
+async def test_hermes_commands_only_from_the_owner_and_only_when_turned_on(adapter, flag, author, allowed):
+    adapter.owner_commands = flag
+    await adapter._deliver(invocation(trigger={"messageId": TRIGGER, "authorId": author, "body": "[@Hermes](#member:AG1) /reload-mcp"}))
+    event = adapter.handled[0]
+    assert event.text == "/reload-mcp" and event.allow_gateway_control is allowed
+
+
+def test_owner_commands_flag_is_read_from_env(monkeypatch):
+    monkeypatch.setenv("ROWBOAT_OWNER_COMMANDS", "true")
+    assert mod.RowboatAdapter(PlatformConfig(enabled=True, extra={"url": "u", "agent_key": "k"})).owner_commands is True
+    monkeypatch.delenv("ROWBOAT_OWNER_COMMANDS")
+    assert mod.RowboatAdapter(PlatformConfig(enabled=True, extra={"url": "u", "agent_key": "k"})).owner_commands is False
 
 
 async def test_context_starts_after_the_agents_own_last_reply(adapter, api):
