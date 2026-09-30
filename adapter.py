@@ -362,9 +362,22 @@ class RowboatAdapter(BasePlatformAdapter):
             await asyncio.sleep(0.5)
         await self._finish(key, turn)
 
+    def _resumes_later(self, key: str) -> bool:
+        """Hermes is going down with this turn and will resume it at its next start: it marks every
+        running session resume_pending before draining, and clears that for a turn that completes."""
+        runner = self._runner()
+        if runner is None or not getattr(runner, "_draining", False):
+            return False
+        lookup = getattr(getattr(self, "_session_store", None), "lookup_by_session_key", None)
+        return bool(lookup and getattr(lookup(key), "resume_pending", False))
+
     async def _finish(self, key: str, turn: _Turn) -> None:
         if self._turns.get(key) is turn:
             del self._turns[key]
+        if self._resumes_later(key):
+            # Not finished: it stays working in Spaces, and the next start adopts it (see _adopt).
+            self._by_invocation.pop(turn.invocation_id, None)
+            return
         await self._idle(turn.chat_id)
         if turn.outcome == ProcessingOutcome.CANCELLED:
             update = {"state": "cancelled"}

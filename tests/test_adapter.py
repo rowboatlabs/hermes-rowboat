@@ -288,6 +288,34 @@ async def test_the_startup_gate_finds_the_runner_behind_hermess_wrapped_handler(
     await asyncio.wait_for(gate, 2)
 
 
+@pytest.mark.parametrize(("resume_pending", "expected"), [(True, []), (False, [{"state": "done"}])])
+async def test_a_turn_hermes_will_resume_after_shutting_down_stays_working(adapter, api, resume_pending, expected):
+    class Entry:
+        pass
+
+    class Store:
+        def lookup_by_session_key(self, key):
+            entry = Entry()
+            entry.resume_pending = resume_pending
+            return entry
+
+    class Runner:
+        _startup_restore_in_progress = False
+        _draining = True  # stopping, or restarting
+
+        async def _handle_adapter_fatal_error(self, adapter):
+            pass
+
+    adapter._fatal_error_handler, adapter._session_store = Runner()._handle_adapter_fatal_error, Store()
+    await adapter._deliver(invocation())
+    key = next(iter(adapter._turns))
+    turn = adapter._turns[key]
+    turn.replied = True  # "Hermes is shutting down" is a post, not an answer
+    adapter._active_sessions.pop(key)
+    await adapter._finish(key, turn)
+    assert updates(api) == expected  # marked: left for the next start; completed in the drain: reported
+
+
 async def test_only_the_first_list_adopts_and_never_a_turn_it_holds(adapter, api):
     await adapter._deliver(invocation())  # this run's own turn, now working
     api.listed = [invocation(state="working"), invocation(id="INV2", state="working", conversation={"spaceId": SPACE, "threadRootId": "M9"})]
