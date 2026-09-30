@@ -289,3 +289,37 @@ async def test_standalone_send_posts_on_the_agents_key(monkeypatch):
     result = await mod._standalone_send(config, "DM1", "Nightly summary")
     assert result == {"success": True, "message_id": "R9"}
     assert seen == [("Bearer rbk_test", "/v1/spaces/DM1/messages", {"body": "Nightly summary", "actingMode": "direct"})]
+
+
+def test_the_setup_wizard_leaves_a_complete_setup(monkeypatch):
+    """`hermes gateway setup`: what it asks, plus everything SETUP.md has an agent save."""
+    import hermes_cli.config as config
+
+    saved_env, saved_config = {}, {}
+    monkeypatch.setattr(config, "save_env_value", lambda k, v: saved_env.__setitem__(k, v))
+    monkeypatch.setattr(config, "set_config_value", lambda k, v: saved_config.__setitem__(k, v))
+    answers = iter(["https://acme.rowboat.test", "rbk_x", "DM1", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    mod.interactive_setup()
+    assert saved_env == {
+        "ROWBOAT_URL": "https://acme.rowboat.test",
+        "ROWBOAT_AGENT_KEY": "rbk_x",
+        "ROWBOAT_HOME_CHANNEL": "DM1",
+        "ROWBOAT_ALLOW_ALL_USERS": "true",
+        "ROWBOAT_OWNER_COMMANDS": "true",
+    }
+    assert saved_config["mcp_servers.rowboat.url"] == "${ROWBOAT_URL}/mcp"
+    assert saved_config["mcp_servers.rowboat.headers.Authorization"] == "Bearer ${ROWBOAT_AGENT_KEY}"
+    assert saved_config["display.platforms.rowboat.show_reasoning"] == "false"
+
+
+def test_setup_md_saves_what_the_wizard_saves():
+    """The agent's instructions and the wizard must not drift apart."""
+    import pathlib
+
+    doc = (pathlib.Path(mod.__file__).parent / "SETUP.md").read_text()
+    for key, value in mod._SETUP_CONFIG:
+        assert f"hermes config set {key} '{value}'" in doc or f"hermes config set {key} {value}" in doc, key
+    for key in ("ROWBOAT_URL", "ROWBOAT_HOME_CHANNEL", "ROWBOAT_ALLOW_ALL_USERS", "ROWBOAT_OWNER_COMMANDS"):
+        assert f"hermes config set {key} " in doc, key
+    assert "hermes plugins install rowboatlabs/hermes-rowboat --enable" in doc

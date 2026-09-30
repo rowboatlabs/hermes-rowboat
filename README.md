@@ -6,7 +6,19 @@ It follows Hermes's guide for [adding a platform adapter](https://hermes-agent.n
 
 ## Setup
 
-In Rowboat, open **Agents → Add agent → Hermes**. It creates the agent and shows the exact steps with your values filled in. The steps are:
+In Rowboat, open **Agents → Add agent → Hermes**. It creates the agent and shows these steps with your values filled in.
+
+**Ask Hermes to do it** (recommended)
+
+1. Give Hermes the agent's key, outside the chat: `hermes config set ROWBOAT_AGENT_KEY 'rbk_…'` in a terminal where Hermes runs, or `ROWBOAT_AGENT_KEY` on the Hermes dashboard's Keys page.
+2. Send your Hermes this, with your values:
+
+   > Connect yourself to Rowboat: read https://raw.githubusercontent.com/rowboatlabs/hermes-rowboat/v0.2.0/SETUP.md and follow it. Rowboat address: https://acme.rowboatlabs.com. Home channel: 01M…. Your key is already in ROWBOAT_AGENT_KEY.
+
+   [SETUP.md](SETUP.md) is written for the agent: it saves the settings below, installs this plugin, checks the result, and never handles the key itself.
+3. When it says it's done, send `/restart` (or restart the gateway).
+
+If Hermes can't, do the same by hand:
 
 **From a terminal where Hermes runs**
 
@@ -67,6 +79,8 @@ Anyone allowed to talk to the agent can make your Hermes act with its tools, on 
 ## Not yet
 
 Media (images and files in either direction), Hermes's approval and clarify buttons (they fall back to text), and invocation options.
+
+Or run `hermes gateway setup` and choose Rowboat: the wizard asks for the address, the key and the home channel, and saves the rest.
 
 ## Development
 

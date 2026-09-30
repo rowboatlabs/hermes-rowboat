@@ -516,12 +516,25 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
     return {"success": True, "message_id": (res.json().get("message") or {}).get("id")}
 
 
-def interactive_setup() -> None:
-    """``hermes gateway setup``: the org address, the agent key, and optionally a home channel."""
-    from hermes_cli.config import save_env_value
+# The same settings SETUP.md has an agent save: the tools over MCP on the same key, and the quiet
+# display defaults Hermes gives Slack. `${VAR}`s stay for Hermes to fill from .env.
+_SETUP_CONFIG = (
+    ("mcp_servers.rowboat.url", "${ROWBOAT_URL}/mcp"),
+    ("mcp_servers.rowboat.headers.Authorization", "Bearer ${ROWBOAT_AGENT_KEY}"),
+    ("display.platforms.rowboat.tool_progress", "off"),
+    ("display.platforms.rowboat.show_reasoning", "false"),
+    ("display.platforms.rowboat.long_running_notifications", "false"),
+    ("display.platforms.rowboat.busy_ack_detail", "false"),
+)
 
-    print("Connect this Hermes to Rowboat as an agent. Add the agent in Rowboat first (Agents → Add agent);")
-    print("it shows the org address and the key once.")
+
+def interactive_setup() -> None:
+    """``hermes gateway setup``: the org address, the agent key, a home channel, then the rest of the
+    setup SETUP.md describes, so the wizard alone leaves a working connection."""
+    from hermes_cli.config import save_env_value, set_config_value
+
+    print("Connect this Hermes to Rowboat as an agent. Add the agent in Rowboat first (Agents → Add agent → Hermes);")
+    print("it shows the org address and the key once, and the home channel.")
     for env, prompt in (("ROWBOAT_URL", "Rowboat org address"), ("ROWBOAT_AGENT_KEY", "Agent key (rbk_…)")):
         value = input(f"{prompt}: ").strip()
         if value:
@@ -529,6 +542,11 @@ def interactive_setup() -> None:
     home = input("Home channel for scheduled results (optional): ").strip()
     if home:
         save_env_value("ROWBOAT_HOME_CHANNEL", home)
+    save_env_value("ROWBOAT_ALLOW_ALL_USERS", "true")
+    owner = input("Let the agent's owner run Hermes commands from Rowboat? [Y/n]: ").strip().lower()
+    save_env_value("ROWBOAT_OWNER_COMMANDS", "false" if owner in {"n", "no"} else "true")
+    for key, value in _SETUP_CONFIG:
+        set_config_value(key, value)
     print("Saved. Restart the gateway for it to take effect: hermes gateway restart")
 
 
