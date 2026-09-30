@@ -88,7 +88,10 @@ Rowboat decides when the agent is invoked (a mention), holds a queue per thread,
 - **One thread is one Hermes session**, shared by everyone in it, DMs included. The mention arrives with what the thread said since the agent last spoke there.
 - **The answer is a message in the thread**, as the agent. Hermes's edits are edits.
 - **Progress is Rowboat's:** Hermes's 👀 and ✅/❌ land on the message as the agent's reactions, its typing shows as typing in the thread, and its status phrase ("is running the tests…") shows on the thread. The invocation ends when Hermes releases the thread's session.
+- **Files come as Hermes's own media.** Images and files attached to the mention are fetched on the agent's key: images go to the model, other files arrive as paths Hermes reads when it needs them. Files earlier in the thread are listed with the address to fetch them.
+- **A DM with the agent needs no mention:** every message there reaches it.
 - **Stop in Rowboat is Hermes's own `/stop`.**
+- **One key, one kind of agent.** The plugin refuses a key of an agent Rowboat reaches another way (such as a Replicas agent), which would otherwise answer its mentions twice.
 - **Restarts don't strand a thread.** A turn Hermes resumes after a restart is followed to its answer; one it can't resume is reported failed as soon as Hermes is back, so the next mention in that thread isn't held up.
 
 ## Security
@@ -97,7 +100,7 @@ Anyone allowed to talk to the agent can make your Hermes act with its tools, on 
 
 ## Not yet
 
-Media (images and files in either direction), Hermes's approval and clarify buttons (they fall back to text), and invocation options.
+Sending files back into Rowboat, Hermes's approval and clarify buttons (they fall back to text), and invocation options.
 
 ## Development
 

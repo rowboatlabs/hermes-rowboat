@@ -42,7 +42,12 @@ from typing import Any, Dict, Optional
 
 from gateway.config import Platform
 from gateway.platforms._shared import extra_or_secret, get_scoped_secret, seed_extra_from_env
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    SendResult,
+    cache_document_from_bytes_async,
+    cache_image_from_bytes_async,
+)
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from gateway.platforms.helpers import MessageDeduplicator, cancel_task
 
@@ -60,6 +65,12 @@ HEARTBEAT_EVERY_S = 300.0
 MAX_MESSAGE_LENGTH = 16_000
 _TRUTHY = {"1", "true", "yes", "on"}
 _TOKEN = re.compile(r"\[([^\]]*)\]\(#([a-z]+)(?::([^)\s]+))?\)")
+# A file in a message (Rowboat spec §8, "Files in a message"): a link to a blob of the space,
+# `[name](https://<org>/s/<space>/b/<sha256>[?name=…])`, or an image `![alt](…)`.
+_ATTACHMENT = re.compile(r"!?\[([^\]\n]*)\]\((\S+?/s/([0-9A-HJKMNP-TV-Z]{26})/b/([a-f0-9]{64})(?:\?name=([^)\s]+))?)\)")
+_IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+# Connections a Hermes plugin may serve: its own, and custom (every agent made before kinds existed).
+_OWN_CONNECTIONS = {None, "plugin", "contract"}
 
 
 def _plain(body: str, self_id: str) -> str:
@@ -70,6 +81,44 @@ def _plain(body: str, self_id: str) -> str:
         return "" if m.group(2) == "member" and m.group(3) == self_id else m.group(1)
 
     return re.sub(r"[ \t]{2,}", " ", _TOKEN.sub(repl, body)).strip()
+
+
+def _attachments(body: str, space: str) -> list[tuple[str, str, str]]:
+    """This space's files a body links to, once each: (hash, name, the link as written)."""
+    found: dict[str, tuple[str, str, str]] = {}
+    for m in _ATTACHMENT.finditer(body):
+        label, _url, link_space, digest, encoded = m.groups()
+        if link_space != space or digest in found:
+            continue
+        name = label or digest[:12]
+        if encoded:
+            with contextlib.suppress(Exception):
+                from urllib.parse import unquote
+
+                name = unquote(encoded)
+        found[digest] = (digest, name, m.group(0))
+    return list(found.values())
+
+
+def _naming_attachments(body: str, space: str, download: Optional[str] = None) -> str:
+    """A body's file links as their names (the files come as Hermes media, or on request);
+    with `download`, the address to fetch each one on the agent's key."""
+    for digest, name, raw in _attachments(body, space):
+        where = f" {download}/v1/spaces/{space}/blobs/{digest}" if download else ""
+        body = body.replace(raw, f"[attached: {name}{where}]")
+    return body
+
+
+def _agent_mismatch(me: dict) -> Optional[str]:
+    """Why this plugin must not serve the agent a key belongs to: one Rowboat reaches another way
+    (a platform it runs itself, such as Replicas) would get a second consumer taking its mentions."""
+    connection, kind = me.get("agentConnection"), me.get("agentKind")
+    if connection in _OWN_CONNECTIONS and kind in (None, "hermes", "custom"):
+        return None
+    return (
+        f"This Rowboat key belongs to a {kind or 'different'} agent that Rowboat reaches through {connection}, "
+        "not one a Hermes plugin can serve. Add a Hermes agent in Rowboat (Agents → Add agent → Hermes) and use its key."
+    )
 
 
 def _chat(chat_id: str) -> tuple[str, Optional[str]]:
@@ -161,6 +210,9 @@ class RowboatAdapter(BasePlatformAdapter):
         self._me = (res.json() or {}).get("member") or {}
         if self._me.get("kind") != "agent":
             return self._fail("not_an_agent", "ROWBOAT_AGENT_KEY is not an agent key", retryable=False)
+        mismatch = _agent_mismatch(self._me)
+        if mismatch:
+            return self._fail("wrong_agent", mismatch, retryable=False)
         # Spaces may offer Stop: Hermes's own /stop cancels a running turn (see _stop).
         await self._api("POST", "/v1/agent/capabilities", {"stop": True, "options": []})
         # The first list after a start also picks up what a previous run acknowledged and never finished.
@@ -298,9 +350,17 @@ class RowboatAdapter(BasePlatformAdapter):
             turn = _Turn(invocation_id=inv_id, message_id=str(trigger.get("messageId") or ""), chat_id=chat_id, source=source)
             self._turns[key] = turn
             self._by_invocation[inv_id] = key
+            body = str(trigger.get("body") or "")
+            media_urls, media_types = await self._media(space, body)
+            is_image = [t.startswith("image/") for t in media_types]
             event = MessageEvent(
-                text=_plain(str(trigger.get("body") or ""), str(self._me.get("id") or "")),
-                message_type=MessageType.TEXT,
+                text=_plain(_naming_attachments(body, space), str(self._me.get("id") or "")),
+                message_type=MessageType.PHOTO if any(is_image) else MessageType.DOCUMENT if media_urls else MessageType.TEXT,
+                media_urls=media_urls,
+                media_types=media_types,
+                # Files other than images reach Hermes as paths it reads when it needs them, never
+                # inlined into the prompt (Rowboat spec §8: other files to disk, not the context).
+                media_text_inlined=[False] * len(media_urls),
                 source=source,
                 message_id=turn.message_id,
                 channel_context=await self._thread_context(space, root, turn.message_id),
@@ -424,8 +484,35 @@ class RowboatAdapter(BasePlatformAdapter):
         for m in before[(own[-1] + 1) if own else 0:][-50:]:
             body = str(m.get("body") or "")
             if body:
-                lines.append(f"{await self._name((m.get('author') or {}).get('memberId', ''))}: {_plain(body, str(self._me.get('id') or ''))}")
+                # Earlier files are listed with where to fetch them (the agent has its key), not delivered.
+                text = _plain(_naming_attachments(body, space, self.base_url), str(self._me.get("id") or ""))
+                lines.append(f"{await self._name((m.get('author') or {}).get('memberId', ''))}: {text}")
         return "[Earlier in this thread]\n" + "\n".join(lines) if lines else None
+
+    async def _media(self, space: str, body: str) -> tuple[list[str], list[str]]:
+        """The invoking message's files, fetched on the agent's key into Hermes's media cache, as
+        Hermes's own adapters deliver attachments: images for the model, other files as paths."""
+        urls: list[str] = []
+        types: list[str] = []
+        if self._http is None:
+            return urls, types
+        for digest, name, _raw in _attachments(body, space):
+            try:
+                res = await self._http.get(f"/v1/spaces/{space}/blobs/{digest}", follow_redirects=True)
+                if res.status_code >= 400:
+                    logger.warning("Rowboat: could not fetch attachment %s (%s)", name, res.status_code)
+                    continue
+                mime = (res.headers.get("content-type") or "application/octet-stream").split(";")[0].strip()
+                if mime in _IMAGE_EXT:
+                    path = await cache_image_from_bytes_async(res.content, _IMAGE_EXT[mime])
+                else:
+                    path = await cache_document_from_bytes_async(res.content, name)
+            except Exception as e:  # noqa: BLE001 — a file too large or unfetchable is skipped, the turn goes on
+                logger.warning("Rowboat: skipping attachment %s: %s", name, e)
+                continue
+            urls.append(path)
+            types.append(mime)
+        return urls, types
 
     async def _name(self, member_id: str) -> Optional[str]:
         if member_id and member_id not in self._names:

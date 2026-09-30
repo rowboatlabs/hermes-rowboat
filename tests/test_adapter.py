@@ -22,6 +22,7 @@ class FakeRowboat:
     def __init__(self):
         self.calls = []
         self.listed = []
+        self.blobs = {}  # path -> (bytes, content type)
         self.thread = {
             "root": {"id": ROOT, "author": {"memberId": "ram"}, "body": "Deploy is at 3pm"},
             "messages": [
@@ -39,6 +40,9 @@ class FakeRowboat:
             return httpx.Response(200, json={"member": AGENT})
         if path == "/v1/members":
             return httpx.Response(200, json={"members": [{"id": "ram", "displayName": "Ramnique"}, {"id": "harsh", "displayName": "Harsh"}]})
+        if path in self.blobs:
+            data, mime = self.blobs[path]
+            return httpx.Response(200, content=data, headers={"content-type": mime})
         if path.endswith(f"/threads/{ROOT}"):
             return httpx.Response(200, json=self.thread)
         if path == "/v1/agent/invocations":
@@ -314,6 +318,76 @@ async def test_a_turn_hermes_will_resume_after_shutting_down_stays_working(adapt
     adapter._active_sessions.pop(key)
     await adapter._finish(key, turn)
     assert updates(api) == expected  # marked: left for the next start; completed in the drain: reported
+
+
+@pytest.mark.parametrize(
+    ("member", "refused"),
+    [
+        ({"agentKind": "hermes", "agentConnection": "plugin"}, False),
+        # Every agent made before Rowboat stored kinds became custom/contract: still served.
+        ({"agentKind": "custom", "agentConnection": "contract"}, False),
+        ({}, False),  # an older Rowboat, which says neither
+        # An agent Rowboat runs itself: a plugin on its key would take its mentions.
+        ({"agentKind": "claude-code", "agentConnection": "replicas"}, True),
+    ],
+)
+def test_refuses_a_key_of_an_agent_rowboat_reaches_another_way(member, refused):
+    reason = mod._agent_mismatch({"kind": "agent", **member})
+    assert (reason is not None) == refused
+    if refused:
+        assert "Add a Hermes agent" in reason
+
+
+ULID_SPACE = "01M3RZS5TR83AZ2N89ABPNNMAK"
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+async def test_a_dm_message_without_a_mention_reaches_hermes_as_written(adapter):
+    # Rowboat invokes an agent on every message in a DM with it (spec §8, 2026-09-30).
+    await adapter._deliver(invocation(where={"spaceKind": "direct", "spaceName": "Direct message"}, trigger={"messageId": TRIGGER, "authorId": "ram", "body": "what is on my plate today?"}))
+    event = adapter.handled[0]
+    assert event.text == "what is on my plate today?"
+    assert event.source.chat_type == "dm"
+
+
+async def test_the_invoking_messages_files_arrive_as_hermes_media(adapter, api, monkeypatch):
+    img, doc = "a" * 64, "b" * 64
+    api.blobs[f"/v1/spaces/{ULID_SPACE}/blobs/{img}"] = (PNG, "image/png")
+    api.blobs[f"/v1/spaces/{ULID_SPACE}/blobs/{doc}"] = (b"line 1\n", "text/plain")
+    cached = []
+
+    async def image(data, ext=".jpg"):
+        cached.append(("image", data, ext))
+        return f"/cache/img{ext}"
+
+    async def document(data, filename):
+        cached.append(("document", data, filename))
+        return f"/cache/doc_{filename}"
+
+    monkeypatch.setattr(mod, "cache_image_from_bytes_async", image)
+    monkeypatch.setattr(mod, "cache_document_from_bytes_async", document)
+    body = (
+        f"[@Hermes](#member:AG1) why is this failing? ![shot](https://acme.test/s/{ULID_SPACE}/b/{img}) "
+        f"[deploy.log](https://acme.test/s/{ULID_SPACE}/b/{doc}?name=deploy.log)"
+    )
+    await adapter._deliver(invocation(conversation={"spaceId": ULID_SPACE, "threadRootId": TRIGGER}, trigger={"messageId": TRIGGER, "authorId": "harsh", "body": body}))
+    event = adapter.handled[0]
+    assert event.media_urls == ["/cache/img.png", "/cache/doc_deploy.log"]
+    assert event.media_types == ["image/png", "text/plain"]
+    assert event.message_type == MessageType.PHOTO
+    # Other files are paths Hermes reads when it needs them, never inlined into the prompt.
+    assert event.media_text_inlined == [False, False]
+    assert event.text == "why is this failing? [attached: shot] [attached: deploy.log]"
+    assert [c[0] for c in cached] == ["image", "document"]
+
+
+async def test_earlier_files_in_the_thread_are_listed_with_where_to_fetch_them(adapter, api):
+    doc = "c" * 64
+    api.thread["messages"][0]["body"] = f"Log attached [build.log](https://acme.test/s/{ULID_SPACE}/b/{doc}?name=build.log)"
+    await adapter._deliver(invocation(conversation={"spaceId": ULID_SPACE, "threadRootId": ROOT}))
+    context = adapter.handled[0].channel_context
+    assert f"Harsh: Log attached [attached: build.log http://rowboat.test/v1/spaces/{ULID_SPACE}/blobs/{doc}]" in context
+    assert adapter.handled[0].media_urls == []
 
 
 async def test_only_the_first_list_adopts_and_never_a_turn_it_holds(adapter, api):
