@@ -22,6 +22,7 @@ class FakeRowboat:
     def __init__(self):
         self.calls = []
         self.listed = []
+        self.decisions = []  # decided approvals the listing returns
         self.blobs = {}  # path -> (bytes, content type)
         self.thread = {
             "root": {"id": ROOT, "author": {"memberId": "ram"}, "body": "Deploy is at 3pm"},
@@ -46,7 +47,9 @@ class FakeRowboat:
         if path.endswith(f"/threads/{ROOT}"):
             return httpx.Response(200, json=self.thread)
         if path == "/v1/agent/invocations":
-            return httpx.Response(200, json={"invocations": self.listed})
+            return httpx.Response(200, json={"invocations": self.listed, "approvals": self.decisions})
+        if path.endswith("/approvals") and request.method == "POST":
+            return httpx.Response(200, json={"approval": {"id": "AP1", "state": "open"}, "message": {"id": "CARD1"}})
         if path.endswith("/messages") and request.method == "POST":
             return httpx.Response(200, json={"message": {"id": "R1"}, "invocations": []})
         if path == "/v1/spaces":
@@ -507,3 +510,72 @@ def test_setup_md_saves_what_the_wizard_saves():
     for key in ("ROWBOAT_URL", "ROWBOAT_AGENT_KEY"):
         assert f"hermes config get {key}" in doc, key
     assert "hermes plugins install rowboatlabs/hermes-rowboat --enable" in doc
+
+
+# --- approvals (Rowboat spec §8 part 4) ---------------------------------------------
+
+
+def _prompt(**over):
+    from types import SimpleNamespace
+
+    fields = dict(
+        chat_id=f"{SPACE}/{ROOT}", session_key="sess-1", command="rm -rf ./build", description="It deletes files",
+        actions=[("Approve once", "once", "primary"), ("Approve for session", "session", ""), ("Deny", "deny", "danger")],
+        text="", smart_denied=False, metadata=None,
+    )
+    fields.update(over)
+    return SimpleNamespace(**fields)
+
+
+def test_approvals_count_as_buttons_so_hermes_posts_no_typed_steps():
+    assert mod.RowboatAdapter.supports_exec_approval_buttons() is True
+
+
+async def test_an_exec_approval_becomes_a_rowboat_approval_on_the_turns_invocation(adapter, api):
+    await adapter._deliver(invocation())
+    sent = await adapter._send_exec_approval_prompt(_prompt())
+    assert sent.success and sent.message_id == "CARD1"
+    method, path, body = [c for c in api.calls if c[1].endswith("/approvals")][0]
+    assert (method, path) == ("POST", "/v1/agent/invocations/INV1/approvals")
+    assert body["title"] == "Run a command" and body["detail"] == "rm -rf ./build" and body["reason"] == "It deletes files"
+    assert body["choices"] == ["allow_once", "allow_session", "deny"] and body["requestKey"]
+
+
+async def test_without_a_turn_it_hands_back_to_hermes(adapter, api):
+    sent = await adapter._send_exec_approval_prompt(_prompt())
+    assert sent.success is False
+    assert not [c for c in api.calls if c[1].endswith("/approvals")]
+
+
+async def test_a_decision_reaches_hermes_and_is_confirmed(adapter, api, monkeypatch):
+    resolved = []
+    monkeypatch.setattr("tools.approval.resolve_gateway_approval", lambda key, choice, **kw: resolved.append((key, choice, kw)) or 1)
+    await adapter._deliver(invocation())
+    await adapter._send_exec_approval_prompt(_prompt())
+    await adapter._on_frame({"kind": "approval_decided", "approval": {"id": "AP1", "state": "denied", "decision": "deny", "note": "use make clean"}})
+    assert resolved == [("sess-1", "deny", {"reason": "use make clean"})]
+    assert ("POST", "/v1/agent/approvals/AP1/applied") in [(m, p) for m, p, _ in api.calls]
+    # The same decision again (the list after the frame) hands nothing to Hermes twice.
+    api.decisions = [{"id": "AP1", "state": "denied", "decision": "deny"}]
+    await adapter._list()
+    assert len(resolved) == 1
+
+
+async def test_a_decision_made_while_away_arrives_with_the_list(adapter, api, monkeypatch):
+    resolved = []
+    monkeypatch.setattr("tools.approval.resolve_gateway_approval", lambda key, choice, **kw: resolved.append((key, choice)) or 1)
+    await adapter._deliver(invocation())
+    await adapter._send_exec_approval_prompt(_prompt())
+    api.decisions = [{"id": "AP1", "state": "allowed", "decision": "allow_session"}]
+    await adapter._list()
+    assert resolved == [("sess-1", "session")]
+
+
+async def test_hermes_timing_out_closes_the_approval_as_expired_instead_of_editing(adapter, api):
+    await adapter._deliver(invocation())
+    await adapter._send_exec_approval_prompt(_prompt())
+    edited = await adapter.edit_message(f"{SPACE}/{ROOT}", "CARD1", "Approval timed out")
+    assert edited.success
+    assert ("POST", "/v1/agent/approvals/AP1/close", {"state": "expired"}) in api.calls
+    assert not [p for p in api.paths("POST") if p.endswith("/edit")]
+

@@ -37,6 +37,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -71,6 +72,9 @@ _ATTACHMENT = re.compile(r"!?\[([^\]\n]*)\]\((\S+?/s/([0-9A-HJKMNP-TV-Z]{26})/b/
 _IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
 # Connections a Hermes plugin may serve: its own, and custom (every agent made before kinds existed).
 _OWN_CONNECTIONS = {None, "plugin", "contract"}
+# Hermes's approval choices and Rowboat's (spec §8 part 4): one-to-one.
+_TO_ROWBOAT = {"once": "allow_once", "session": "allow_session", "always": "allow_always", "deny": "deny"}
+_FROM_ROWBOAT = {v: k for k, v in _TO_ROWBOAT.items()}
 
 
 def _readable(body: str, self_id: str) -> str:
@@ -169,6 +173,9 @@ class RowboatAdapter(BasePlatformAdapter):
         self._spaces: Dict[str, Dict[str, Any]] = {}
         self._turns: Dict[str, _Turn] = {}  # session key → the turn Hermes is running there
         self._by_invocation: Dict[str, str] = {}  # invocation id → session key
+        self._approvals: Dict[str, str] = {}  # open approval id → the Hermes session waiting on it
+        self._approval_cards: Dict[str, str] = {}  # card message id → its approval id
+        self._applying: set[str] = set()  # decisions being handed to Hermes (the frame and the list can race)
         self._adopting = False
         self._typing: set[str] = set()  # chats shown as typing, so idle is sent once
         # Invocations can arrive twice (the live frame and the minute's list); the shared deduplicator
@@ -300,6 +307,9 @@ class RowboatAdapter(BasePlatformAdapter):
                 await self._deliver(invocation)
             elif adopting and str(invocation.get("id") or "") not in self._by_invocation:
                 await self._adopt(invocation)
+        # Decisions made while the live connection was away (spec §8 part 4: the list is the guarantee).
+        for approval in listed.get("approvals", []):
+            await self._apply_decision(approval)
 
     async def _on_frame(self, frame: dict) -> None:
         kind = frame.get("kind")
@@ -307,6 +317,56 @@ class RowboatAdapter(BasePlatformAdapter):
             await self._deliver(frame.get("invocation") or {})
         elif kind == "invocation_stop":
             await self._stop(str(frame.get("invocationId") or ""))
+        elif kind == "approval_decided":
+            await self._apply_decision(frame.get("approval") or {})
+
+    # --- approvals (Rowboat spec §8 part 4) ---------------------------------------
+
+    async def _send_exec_approval_prompt(self, prompt: Any) -> SendResult:
+        """Hermes's exec approval as a Rowboat approval: the agent's card in the thread, with one
+        button per choice Hermes offers, decided by any person who can see it. Overriding this hook
+        is what tells Hermes the platform has buttons, so it posts no typed `/approve` steps."""
+        turn = self._turn_for_chat(prompt.chat_id)
+        choices = [_TO_ROWBOAT[choice] for _label, choice, _style in prompt.actions if choice in _TO_ROWBOAT]
+        if turn is None or not choices:
+            return SendResult(success=False, error="no Rowboat turn is waiting on this approval")
+        request = {
+            # Hermes gives no id of its own; it never re-sends a prompt (a late ack keeps the first).
+            "requestKey": uuid.uuid4().hex,
+            "title": "Run a command",
+            "detail": (prompt.command or "")[:8000],
+            **({"reason": prompt.description[:1000]} if prompt.description else {}),
+            "choices": choices,
+        }
+        raised = await self._api("POST", f"/v1/agent/invocations/{turn.invocation_id}/approvals", request, quiet=False)
+        if not raised:
+            return SendResult(success=False, error="Rowboat did not take the approval", retryable=True)
+        approval_id = str((raised.get("approval") or {}).get("id") or "")
+        card_id = (raised.get("message") or {}).get("id")
+        self._approvals[approval_id] = prompt.session_key
+        if card_id:
+            self._approval_cards[str(card_id)] = approval_id
+        return SendResult(success=True, message_id=card_id)
+
+    async def _apply_decision(self, approval: dict) -> None:
+        """A person decided: hand it to Hermes, then confirm, so the listing stops returning it."""
+        approval_id = str(approval.get("id") or "")
+        if not approval_id or approval_id in self._applying:
+            return
+        self._applying.add(approval_id)
+        try:
+            session_key = self._approvals.pop(approval_id, None)
+            self._approval_cards = {card: a for card, a in self._approval_cards.items() if a != approval_id}
+            choice = _FROM_ROWBOAT.get(str(approval.get("decision") or ""), "deny")
+            if session_key:
+                from tools.approval import resolve_gateway_approval
+
+                # Hermes resolves a session's oldest pending approval, as its Slack buttons do; one at a time is the norm.
+                resolve_gateway_approval(session_key, choice, reason=approval.get("note") if choice == "deny" else None)
+            # Not held here: a restart took Hermes's pending approval with its turn, so there is nothing to hand over.
+            await self._api("POST", f"/v1/agent/approvals/{approval_id}/applied")
+        finally:
+            self._applying.discard(approval_id)
 
     # --- invocations in -----------------------------------------------------------
 
@@ -551,6 +611,12 @@ class RowboatAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=(posted.get("message") or {}).get("id"))
 
     async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False):
+        approval_id = self._approval_cards.pop(message_id, None)
+        if approval_id:
+            # Hermes rewrites its card when its own timer runs out: the approval expired, and the card says so.
+            self._approvals.pop(approval_id, None)
+            await self._api("POST", f"/v1/agent/approvals/{approval_id}/close", {"state": "expired"})
+            return SendResult(success=True, message_id=message_id)
         space, _ = _chat(chat_id)
         body = {"body": (content or "").strip() or "…", "actingMode": "direct"}
         ok = await self._api("POST", f"/v1/spaces/{space}/messages/{message_id}/edit", body)

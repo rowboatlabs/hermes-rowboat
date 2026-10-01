@@ -94,12 +94,13 @@ Rowboat decides when the agent is invoked (a mention), holds a queue per thread,
 - **Files come as Hermes's own media.** Images and files attached to the mention are fetched on the agent's key: images go to the model, other files arrive as paths Hermes reads when it needs them. Files earlier in the thread are listed with the address to fetch them.
 - **A DM with the agent needs no mention:** every message there reaches it.
 - **Stop in Rowboat is Hermes's own `/stop`.**
+- **Approvals are cards in the thread.** When Hermes asks before running a command, the card shows the command and why, with Hermes's choices: Allow once, Allow in this thread, Always allow, Deny (with a note back to Hermes). Any person who can see the card can decide, and the card then says who did. When Hermes's own approval timer runs out, the card says it expired.
 - **One key, one kind of agent.** The plugin refuses a key of an agent Rowboat reaches another way (such as a Replicas agent), which would otherwise answer its mentions twice.
 - **Restarts don't strand a thread.** A turn Hermes resumes after a restart is followed to its answer; one it can't resume is reported failed as soon as Hermes is back, so the next mention in that thread isn't held up.
 
 ## Security
 
-Anyone allowed to talk to the agent can make your Hermes act with its tools, on the machine it runs on. Choose who with `ROWBOAT_ALLOW_ALL_USERS` or `ROWBOAT_ALLOWED_USERS`, and consider a dedicated Hermes profile with restricted `platform_toolsets.rowboat` for a shared space. Hermes commands (`/model`, `/reset`, `/approve`, …) run from Rowboat only for the agent's owner, and only with `ROWBOAT_OWNER_COMMANDS` on: nobody else can change your Hermes, or approve what it asks approval for, from a space.
+Anyone allowed to talk to the agent can make your Hermes act with its tools, on the machine it runs on. Choose who with `ROWBOAT_ALLOW_ALL_USERS` or `ROWBOAT_ALLOWED_USERS`, and consider a dedicated Hermes profile with restricted `platform_toolsets.rowboat` for a shared space. Hermes commands (`/model`, `/reset`, …) run from Rowboat only for the agent's owner, and only with `ROWBOAT_OWNER_COMMANDS` on: nobody else can change your Hermes from a space. Approvals are different: any person who can see an approval card in a space can decide it, as anyone who can talk to Hermes in Slack can, so keep a Hermes that runs on your own machine out of spaces you don't trust.
 
 ## Not yet
 
