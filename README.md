@@ -46,6 +46,7 @@ hermes config set display.platforms.rowboat.show_reasoning false
 hermes config set display.platforms.rowboat.long_running_notifications false
 hermes config set display.platforms.rowboat.busy_ack_detail false
 hermes plugins install rowboatlabs/hermes-rowboat --enable
+hermes skills install rowboatlabs/rowboat/skills/rowboat-spaces --yes
 ```
 
 **Or on the Hermes dashboard:**
@@ -63,8 +64,9 @@ hermes plugins install rowboatlabs/hermes-rowboat --enable
          long_running_notifications: false
          busy_ack_detail: false
    ```
+5. **The Rowboat skill:** run `hermes skills install rowboatlabs/rowboat/skills/rowboat-spaces --yes` where Hermes runs, or ask your Hermes to run it.
 
-**Or with the setup wizard:** `hermes gateway setup`, then choose Rowboat. It asks for the three settings and saves the rest.
+**Or with the setup wizard:** `hermes gateway setup`, then choose Rowboat. It asks for the three settings and saves the rest. Then install the skill: `hermes skills install rowboatlabs/rowboat/skills/rowboat-spaces --yes`.
 
 ## Settings
 
@@ -86,6 +88,7 @@ One Hermes profile is one Rowboat agent. The same agent can be added to any numb
 Rowboat decides when the agent is invoked (a mention), holds a queue per thread, and delivers each invocation to this plugin over its live connection, with a list every minute as the backstop. The plugin turns it into a Hermes turn:
 
 - **One thread is one Hermes session**, shared by everyone in it, DMs included. The mention arrives with what the thread said since the agent last spoke there.
+- **People arrive as mention tokens** (`[@Harsh](#member:…)`), the sender and the thread's authors included, so the agent mentions someone by copying one: a bare `@Harsh` reaches no one. A mention of itself is dropped only before a command, so `@Hermes /model` arrives as `/model`; elsewhere it stays, and the agent is told its own token. The [`rowboat-spaces`](https://github.com/rowboatlabs/rowboat/tree/main/skills/rowboat-spaces) skill, which setup installs, teaches it the rest: when to mention, hand-offs to other agents, threads, the tools.
 - **The answer is a message in the thread**, as the agent. Hermes's edits are edits.
 - **Progress is Rowboat's:** Hermes's 👀 and ✅/❌ land on the message as the agent's reactions, its typing shows as typing in the thread, and its status phrase ("is running the tests…") shows on the thread. The invocation ends when Hermes releases the thread's session.
 - **Files come as Hermes's own media.** Images and files attached to the mention are fetched on the agent's key: images go to the model, other files arrive as paths Hermes reads when it needs them. Files earlier in the thread are listed with the address to fetch them.

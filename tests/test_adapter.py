@@ -130,9 +130,18 @@ def test_env_enablement_needs_both_settings_and_seeds_home(monkeypatch):
     assert mod.check_requirements() is True
 
 
-def test_mentions_read_as_labels_and_its_own_is_dropped():
-    assert mod._plain("[@Hermes](#member:AG1) /help", "AG1") == "/help"
-    assert mod._plain("[@Hermes](#member:AG1) ask [@Harsh](#member:h) about [#Pay](#space:s)", "AG1") == "ask @Harsh about #Pay"
+def test_mentions_stay_tokens_and_its_own_is_dropped_only_before_a_command():
+    assert mod._readable("[@Hermes](#member:AG1) /help", "AG1") == "/help"
+    assert mod._readable("[@Hermes](#member:AG1), /help", "AG1") == "/help"
+    assert (
+        mod._readable("[@Hermes](#member:AG1) ask [@Harsh](#member:h) about [#Pay](#space:s)", "AG1")
+        == "[@Hermes](#member:AG1) ask [@Harsh](#member:h) about [#Pay](#space:s)"
+    )
+    # Mid-sentence it stays: dropped, it would leave a blank the agent tries to explain.
+    assert (
+        mod._readable("[@Ceecee](#member:c) and [@Hermes](#member:AG1) - introduce yourselves", "AG1")
+        == "[@Ceecee](#member:c) and [@Hermes](#member:AG1) - introduce yourselves"
+    )
     assert mod._chat("S/R") == ("S", "R") and mod._chat("S") == ("S", None)
 
 
@@ -143,13 +152,17 @@ async def test_an_invocation_becomes_one_turn_in_the_threads_session(adapter, ap
     await adapter._deliver(invocation())
     assert len(adapter.handled) == 1
     event = adapter.handled[0]
-    assert event.text == "plan?" and event.message_type == MessageType.TEXT and event.message_id == TRIGGER
+    assert event.text == "[@Hermes](#member:AG1) plan?" and event.message_type == MessageType.TEXT and event.message_id == TRIGGER
     assert event.source.chat_id == f"{SPACE}/{ROOT}" and event.source.thread_id == ROOT
     assert event.source.chat_type == "group" and event.source.chat_name == "Payments"
     assert event.source.user_id == "harsh" and event.source.user_name == "Harsh"
     assert event.allow_gateway_control is False
-    # What the thread said before the mention, since the agent last spoke (it never has here).
-    assert event.channel_context == "[Earlier in this thread]\nRamnique: Deploy is at 3pm\nHarsh: Migration first"
+    # What the thread said before the mention, since the agent last spoke (it never has here), and who
+    # asked, everyone as a token the agent can copy to mention them.
+    assert event.channel_context == (
+        "[Earlier in this thread]\n[@Ramnique](#member:ram): Deploy is at 3pm\n[@Harsh](#member:harsh): Migration first"
+        "\n\n[You are [@Hermes](#member:AG1); the new message is from [@Harsh](#member:harsh)]"
+    )
     assert ("POST", "/v1/agent/invocations/INV1/ack") in [(m, p) for m, p, _ in api.calls]
 
 
@@ -174,7 +187,7 @@ def test_owner_commands_flag_is_read_from_env(monkeypatch):
 async def test_context_starts_after_the_agents_own_last_reply(adapter, api):
     api.thread["messages"].insert(0, {"id": "M2a", "author": {"memberId": "AG1"}, "body": "Noted."})
     await adapter._deliver(invocation())
-    assert adapter.handled[0].channel_context == "[Earlier in this thread]\nHarsh: Migration first"
+    assert adapter.handled[0].channel_context.startswith("[Earlier in this thread]\n[@Harsh](#member:harsh): Migration first\n\n")
 
 
 async def test_a_dm_is_a_dm_chat(adapter):
@@ -377,7 +390,7 @@ async def test_the_invoking_messages_files_arrive_as_hermes_media(adapter, api, 
     assert event.message_type == MessageType.PHOTO
     # Other files are paths Hermes reads when it needs them, never inlined into the prompt.
     assert event.media_text_inlined == [False, False]
-    assert event.text == "why is this failing? [attached: shot] [attached: deploy.log]"
+    assert event.text == "[@Hermes](#member:AG1) why is this failing? [attached: shot] [attached: deploy.log]"
     assert [c[0] for c in cached] == ["image", "document"]
 
 
@@ -386,7 +399,7 @@ async def test_earlier_files_in_the_thread_are_listed_with_where_to_fetch_them(a
     api.thread["messages"][0]["body"] = f"Log attached [build.log](https://acme.test/s/{ULID_SPACE}/b/{doc}?name=build.log)"
     await adapter._deliver(invocation(conversation={"spaceId": ULID_SPACE, "threadRootId": ROOT}))
     context = adapter.handled[0].channel_context
-    assert f"Harsh: Log attached [attached: build.log http://rowboat.test/v1/spaces/{ULID_SPACE}/blobs/{doc}]" in context
+    assert f"[@Harsh](#member:harsh): Log attached [attached: build.log http://rowboat.test/v1/spaces/{ULID_SPACE}/blobs/{doc}]" in context
     assert adapter.handled[0].media_urls == []
 
 

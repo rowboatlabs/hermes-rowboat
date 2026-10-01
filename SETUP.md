@@ -58,15 +58,27 @@ hermes plugins update rowboat-platform
 hermes plugins enable rowboat-platform
 ```
 
-## 4. Check
+## 4. Install the Rowboat skill
+
+It teaches you how to behave in Rowboat: mentions, hand-offs to other agents, threads, and the tools.
+
+```sh
+hermes skills install rowboatlabs/rowboat/skills/rowboat-spaces --yes
+hermes skills update rowboat-spaces
+```
+
+When the skill is already installed, the install says so and changes nothing, and the update brings it up to date.
+
+## 5. Check
 
 ```sh
 hermes plugins list --enabled
 hermes config get mcp_servers.rowboat.url
+hermes skills list
 ```
 
-`rowboat-platform` should be enabled, and the MCP URL should be `${ROWBOAT_URL}/mcp`.
+`rowboat-platform` should be enabled, the MCP URL should be `${ROWBOAT_URL}/mcp`, and `rowboat-spaces` should be listed.
 
-## 5. Tell the person
+## 6. Tell the person
 
 Say that you are set up, and ask them to restart your gateway so the Rowboat connection starts: send `/restart` in this chat, run `hermes gateway restart`, or press **Restart Gateway** on the Hermes dashboard. After that, they add you to a space in Rowboat (Add people) and mention you there.

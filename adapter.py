@@ -73,14 +73,14 @@ _IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "i
 _OWN_CONNECTIONS = {None, "plugin", "contract"}
 
 
-def _plain(body: str, self_id: str) -> str:
-    """Mention and space tokens read as their labels; the agent's own mention is dropped, as
-    Hermes's Slack adapter does, so "@Hermes /help" reaches it as "/help"."""
-
-    def repl(m: re.Match) -> str:
-        return "" if m.group(2) == "member" and m.group(3) == self_id else m.group(1)
-
-    return re.sub(r"[ \t]{2,}", " ", _TOKEN.sub(repl, body)).strip()
+def _readable(body: str, self_id: str) -> str:
+    """Mention and space tokens stay as written, so the agent mentions someone by copying one (Rowboat
+    spec §8, 2026-10-01: shown plain names, agents answered with plain names, which reach no one). A
+    mention of the agent is dropped only before a command, so "@Hermes /help" reaches it as "/help";
+    anywhere else it stays (dropped, it leaves a blank the agent tries to explain), and the context
+    names the agent's own token."""
+    leading = rf"^\s*(?:\[@[^\]\n]*\]\(#member:{re.escape(self_id)}\)[\s,:]*)+(?=/)" if self_id else r"^(?!)"
+    return re.sub(leading, "", body).strip()
 
 
 def _attachments(body: str, space: str) -> list[tuple[str, str, str]]:
@@ -354,7 +354,7 @@ class RowboatAdapter(BasePlatformAdapter):
             media_urls, media_types = await self._media(space, body)
             is_image = [t.startswith("image/") for t in media_types]
             event = MessageEvent(
-                text=_plain(_naming_attachments(body, space), str(self._me.get("id") or "")),
+                text=_readable(_naming_attachments(body, space), str(self._me.get("id") or "")),
                 message_type=MessageType.PHOTO if any(is_image) else MessageType.DOCUMENT if media_urls else MessageType.TEXT,
                 media_urls=media_urls,
                 media_types=media_types,
@@ -363,7 +363,7 @@ class RowboatAdapter(BasePlatformAdapter):
                 media_text_inlined=[False] * len(media_urls),
                 source=source,
                 message_id=turn.message_id,
-                channel_context=await self._thread_context(space, root, turn.message_id),
+                channel_context=await self._thread_context(space, root, turn.message_id, author),
                 # Hermes commands only from the agent's owner, and only when the owner turned them on.
                 allow_gateway_control=self.owner_commands and bool(author) and author == self._me.get("ownerId"),
                 metadata={"rowboat_invocation": inv_id},
@@ -402,7 +402,7 @@ class RowboatAdapter(BasePlatformAdapter):
         if not inv_id or key in self._turns:
             return
         turn = _Turn(invocation_id=inv_id, message_id=str(trigger.get("messageId") or ""), chat_id=chat_id, source=source, adopted=True)
-        if _plain(str(trigger.get("body") or ""), str(self._me.get("id") or "")).split()[:1] == ["/restart"]:
+        if _readable(str(trigger.get("body") or ""), str(self._me.get("id") or "")).split()[:1] == ["/restart"]:
             turn.outcome = ProcessingOutcome.SUCCESS
         self._turns[key] = turn
         self._by_invocation[inv_id] = key
@@ -465,8 +465,17 @@ class RowboatAdapter(BasePlatformAdapter):
             MessageEvent(text="/stop", message_type=MessageType.COMMAND, source=turn.source, allow_gateway_control=True)
         )
 
-    async def _thread_context(self, space: str, root: str, trigger_id: str) -> Optional[str]:
-        """What the thread said since the agent last spoke there: Hermes only hears its mentions."""
+    async def _thread_context(self, space: str, root: str, trigger_id: str, author: str) -> str:
+        """What the thread said since the agent last spoke there (Hermes only hears its mentions), who
+        it is, and who sent the new message, everyone as a mention token: Hermes's sender prefix shows
+        only a name. Its Slack adapter adds the sender's `<@U…>` id there for the same reason."""
+        me = self._me or {}
+        own = re.sub(r"[\[\]\n]", " ", str(me.get("displayName") or "")).strip() or str(me.get("id") or "")
+        sender = f"[You are [@{own}](#member:{me.get('id')}); the new message is from {await self._token(author)}]"
+        earlier = await self._earlier(space, root, trigger_id)
+        return f"{earlier}\n\n{sender}" if earlier else sender
+
+    async def _earlier(self, space: str, root: str, trigger_id: str) -> Optional[str]:
         if trigger_id == root:
             return None
         page = await self._api("GET", f"/v1/spaces/{space}/threads/{root}?limit=100")
@@ -485,8 +494,8 @@ class RowboatAdapter(BasePlatformAdapter):
             body = str(m.get("body") or "")
             if body:
                 # Earlier files are listed with where to fetch them (the agent has its key), not delivered.
-                text = _plain(_naming_attachments(body, space, self.base_url), str(self._me.get("id") or ""))
-                lines.append(f"{await self._name((m.get('author') or {}).get('memberId', ''))}: {text}")
+                text = _readable(_naming_attachments(body, space, self.base_url), str(self._me.get("id") or ""))
+                lines.append(f"{await self._token((m.get('author') or {}).get('memberId', ''))}: {text}")
         return "[Earlier in this thread]\n" + "\n".join(lines) if lines else None
 
     async def _media(self, space: str, body: str) -> tuple[list[str], list[str]]:
@@ -513,6 +522,11 @@ class RowboatAdapter(BasePlatformAdapter):
             urls.append(path)
             types.append(mime)
         return urls, types
+
+    async def _token(self, member_id: str) -> str:
+        """A member's mention token, labeled from the roster (a label may not hold brackets or newlines)."""
+        label = re.sub(r"[\[\]\n]", " ", await self._name(member_id) or "").strip() or member_id
+        return f"[@{label}](#member:{member_id})"
 
     async def _name(self, member_id: str) -> Optional[str]:
         if member_id and member_id not in self._names:
@@ -724,8 +738,11 @@ def register(ctx):
         allow_update_command=False,
         platform_hint=(
             "You are a member of a Rowboat Space, a team chat. Each conversation is one thread and you "
-            "reply in it; replies render as Markdown. Messages reach you when someone mentions you, with "
-            "what the thread said since your last reply. To read further or act elsewhere in Spaces, use "
-            "the rowboat tools if you have them."
+            "reply in it; replies render as Markdown. Messages reach you when someone mentions you (in a DM, "
+            "every message does), with what the thread said since your last reply. People appear as mention "
+            "tokens like [@Name](#member:id): to mention someone, copy their token exactly; a bare @Name is plain "
+            "text that reaches no one. Agents see only messages that mention them. Whenever you need a person or "
+            "an agent to act or answer, mention them, and never to thank, acknowledge or sign off. For more, use "
+            "the rowboat-spaces skill and the rowboat tools."
         ),
     )
