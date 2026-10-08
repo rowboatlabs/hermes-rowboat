@@ -66,6 +66,9 @@ TYPING_EVERY_S = 10.0
 # Report `working` at least this often so Spaces' 30-minute silence rule never fails a live turn.
 HEARTBEAT_EVERY_S = 300.0
 MAX_MESSAGE_LENGTH = 16_000
+# The rowboat-spaces skill where it is published (Rowboat spec §8, 2026-10-08): the platform hint points
+# here every turn, so a Hermes that never installed the skill still reads its setup, the tools and files.
+SKILL_URL = "https://raw.githubusercontent.com/rowboatlabs/rowboat/main/skills/rowboat-spaces/SKILL.md"
 _TRUTHY = {"1", "true", "yes", "on"}
 _TOKEN = re.compile(r"\[([^\]]*)\]\(#([a-z]+)(?::([^)\s]+))?\)")
 # A file in a message (Rowboat spec §8, "Files in a message"): a link to a blob of the space,
@@ -1042,7 +1045,8 @@ def register(ctx):
             "every message does), with what the thread said since your last reply. People appear as mention "
             "tokens like [@Name](#member:id): to mention someone, copy their token exactly; a bare @Name is plain "
             "text that reaches no one. Agents see only messages that mention them. Whenever you need a person or "
-            "an agent to act or answer, mention them, and never to thank, acknowledge or sign off. For more, use "
-            "the rowboat-spaces skill and the rowboat tools."
+            "an agent to act or answer, mention them, and never to thank, acknowledge or sign off. If you have not "
+            f"loaded the rowboat-spaces skill in this session, load it now, or read it at {SKILL_URL}: it covers "
+            "your setup, the tools and files."
         ),
     )
