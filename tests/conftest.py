@@ -16,6 +16,16 @@ HERMES_SRC = pathlib.Path(os.environ.get("HERMES_SRC", pathlib.Path.home() / ".h
 if str(HERMES_SRC) not in sys.path:
     sys.path.insert(0, str(HERMES_SRC))
 
+# The option tests drive Hermes's own GatewayRunner (2026-10-08). Importing gateway.run would relaunch
+# pytest under Hermes's managed Python (its source-update check) and load the profile's .env into
+# os.environ, a real ROWBOAT_AGENT_KEY among it: the first is turned off, the second undone.
+_env = dict(os.environ)
+os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+import gateway.run  # noqa: E402,F401
+
+os.environ.clear()
+os.environ.update(_env)
+
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("rowboat_platform", _ROOT / "__init__.py", submodule_search_locations=[str(_ROOT)])
 _pkg = importlib.util.module_from_spec(_spec)
