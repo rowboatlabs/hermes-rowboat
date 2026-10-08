@@ -94,6 +94,7 @@ Rowboat decides when the agent is invoked (a mention), holds a queue per thread,
 - **Files come as Hermes's own media.** Images and files attached to the mention are fetched on the agent's key: images go to the model, other files arrive as paths Hermes reads when it needs them. Files earlier in the thread are listed with the address to fetch them.
 - **A DM with the agent needs no mention:** every message there reaches it.
 - **Stop in Rowboat is Hermes's own `/stop`.**
+- **Model and Effort are options on the mention.** Rowboat offers Hermes's models (what its `/model` picker lists, the configured model first, at most 100 shared across providers) and its reasoning levels. Picked, they apply to that one turn, set the way Hermes's `/model --once` sets a model, so nothing is posted about them. A mention without them runs on Hermes's configuration, whatever an earlier mention picked; the owner's defaults for the agent in Rowboat come with every mention. A model Hermes no longer offers or can't reach is skipped and logged, and the turn runs on the configuration. Hermes commands take no options. The model list is read again every five minutes.
 - **Approvals are cards in the thread.** When Hermes asks before running a command, the card shows the command and why, with Hermes's choices: Allow once, Allow in this thread, Always allow, Deny (with a note back to Hermes). Any person who can see the card can decide, and the card then says who did. When Hermes's own approval timer runs out, the card says it expired.
 - **One key, one kind of agent.** The plugin refuses a key of an agent Rowboat reaches another way (such as a Replicas agent), which would otherwise answer its mentions twice.
 - **Restarts don't strand a thread.** A turn Hermes resumes after a restart is followed to its answer; one it can't resume is reported failed as soon as Hermes is back, so the next mention in that thread isn't held up.
@@ -104,7 +105,7 @@ Anyone allowed to talk to the agent can make your Hermes act with its tools, on 
 
 ## Not yet
 
-Sending files back into Rowboat, Hermes's approval and clarify buttons (they fall back to text), and invocation options.
+Sending files back into Rowboat, and Hermes's clarify buttons (they fall back to text).
 
 ## Development
 

@@ -20,6 +20,8 @@ while Hermes answers in the thread as the agent.
   land on the message as the agent's reactions, its typing is typing in the
   thread, its status phrase is the invocation's activity line.
 - A turn is done when Hermes releases the thread's session, not on ✅ alone.
+- Spaces offers Hermes's models and reasoning levels as the agent's Model and Effort options;
+  an invocation that carries them runs its turn, and only that turn, with them.
 
 Settings (env, or ``platforms.rowboat.extra``): ROWBOAT_URL (the org's
 address), ROWBOAT_AGENT_KEY (the agent's key), ROWBOAT_HOME_CHANNEL
@@ -75,6 +77,20 @@ _OWN_CONNECTIONS = {None, "plugin", "contract"}
 # Hermes's approval choices and Rowboat's (spec §8 part 4): one-to-one.
 _TO_ROWBOAT = {"once": "allow_once", "session": "allow_session", "always": "allow_always", "deny": "deny"}
 _FROM_ROWBOAT = {v: k for k, v in _TO_ROWBOAT.items()}
+# Invocation options (spec §8, 2026-10-08). Harbor takes at most 100 choices a select.
+MAX_CHOICES = 100
+# Re-read Hermes's model catalog this often and declare again when it changed: a /model --global,
+# a provider added, a catalog its cache warmed since.
+OPTIONS_EVERY_S = 300.0
+# The catalog is read from Hermes's caches; a cold models.dev cache can still block, and connect must not.
+CATALOG_TIMEOUT_S = 20.0
+_EFFORT_LABELS = {"xhigh": "Extra high"}
+# The runner's per-session state that Hermes's own /model --once and /moa use; without it options are skipped.
+_RUNNER_STATE = (
+    "_session_key_for_source", "_session_state", "_peek_session_state", "_session_model_override",
+    "_claim_one_turn_restore", "_restore_pending_one_turn_model_override", "_evict_cached_agent",
+    "_set_session_reasoning_override",
+)
 
 
 def _readable(body: str, self_id: str) -> str:
@@ -130,6 +146,95 @@ def _chat(chat_id: str) -> tuple[str, Optional[str]]:
     return space, (root or None)
 
 
+# --- invocation options (Rowboat spec §8, 2026-10-08) --------------------------------
+
+
+def _route() -> Any:
+    """This Hermes's configured model and providers, read as its /model command reads them."""
+    from gateway.slash_commands_model import _ModelSwitchContext
+
+    route = _ModelSwitchContext(session_key="", source=None, config_path=None, persist_global=False)
+    route.read_config()
+    return route
+
+
+def _fair_share(groups: list[list], cap: int) -> list:
+    """At most `cap` items, dealt one per group in turn and kept in group order: every provider
+    shows, and one with fifty models doesn't crowd out one with five."""
+    take = [0] * len(groups)
+    while sum(take) < cap and any(n < len(g) for n, g in zip(take, groups)):
+        for i, g in enumerate(groups):
+            if take[i] < len(g) and sum(take) < cap:
+                take[i] += 1
+    return [item for g, n in zip(groups, take) for item in g[:n]]
+
+
+def _model_catalog() -> tuple[Dict[str, tuple[str, str, str]], Optional[str]]:
+    """The models this Hermes can run: what its /model picker lists (list_picker_providers, from its
+    caches, as the picker reads them in a chat), as choice id → (label, provider, model), the
+    configured model first; and that model's id. The id carries the provider: Hermes switches by both."""
+    from hermes_cli.model_switch import format_model_for_display
+    from hermes_cli.model_switch_providers import list_picker_providers
+
+    route = _route()
+    rows = list_picker_providers(
+        max_models=50, current_provider=route.current_provider, current_base_url=route.current_base_url,
+        current_model=route.current_model, user_providers=route.user_provs, custom_providers=route.custom_provs,
+        excluded_providers=route.excluded_provs, non_blocking_catalogs=True, probe_custom_providers=False,
+        probe_current_custom_provider=True,
+    )
+    groups, configured = [], None
+    for row in rows:
+        slug, name = str(row.get("slug") or ""), str(row.get("name") or row.get("slug") or "")
+        models = [m for m in row.get("models") or [] if isinstance(m, str) and m]
+        if row.get("is_current") and route.current_model in models:
+            models.insert(0, models.pop(models.index(route.current_model)))
+            configured = f"{slug}:{route.current_model}"
+        # An id too long for Rowboat is left out: cut short, it would name no model.
+        groups.append([
+            (f"{slug}:{m}", f"{format_model_for_display(m)} · {name}"[:128], slug, m)
+            for m in models if slug and len(slug) + 1 + len(m) <= 256
+        ])
+    # Hermes lists the current provider first already; the configured model leads either way.
+    groups.sort(key=lambda g: not (configured and g and g[0][0] == configured))
+    catalog: Dict[str, tuple[str, str, str]] = {}
+    for cid, label, slug, model in _fair_share([g for g in groups if g], MAX_CHOICES):
+        catalog.setdefault(cid, (label, slug, model))
+    return catalog, (configured if configured in catalog else None)
+
+
+def _effort_option() -> Optional[dict]:
+    """Hermes's reasoning levels, as its /reasoning picker offers them: none, then its ladder."""
+    try:
+        from hermes_constants import VALID_REASONING_EFFORTS
+    except ImportError:
+        return None
+    choices = [{"id": lv, "label": _EFFORT_LABELS.get(lv, lv.capitalize())} for lv in ("none", *VALID_REASONING_EFFORTS)]
+    return {"type": "select", "key": "effort", "label": "Effort", "choices": choices}
+
+
+def _switch(provider: str, model: str) -> Any:
+    """A picked model resolved as Hermes resolves a /model picker choice: credentials, endpoint, wire."""
+    from hermes_cli.model_switch import switch_model
+
+    route = _route()
+    return switch_model(
+        raw_input=model, current_provider=route.current_provider, current_model=route.current_model,
+        current_base_url=route.current_base_url, explicit_provider=provider,
+        user_providers=route.user_provs, custom_providers=route.custom_provs,
+    )
+
+
+@dataclass
+class _Applied:
+    """What an invocation's options set on Hermes's session, to put back when its turn ends."""
+
+    session_key: str
+    model: bool = False
+    effort: Optional[dict] = None
+    effort_before: Optional[dict] = None
+
+
 @dataclass
 class _Turn:
     invocation_id: str
@@ -143,6 +248,7 @@ class _Turn:
     reported_at: float = field(default_factory=time.monotonic)
     # Acknowledged by this agent's previous run, which Hermes restarted under.
     adopted: bool = False
+    applied: Optional[_Applied] = None
 
 
 class RowboatAdapter(BasePlatformAdapter):
@@ -181,6 +287,10 @@ class RowboatAdapter(BasePlatformAdapter):
         # Invocations can arrive twice (the live frame and the minute's list); the shared deduplicator
         # also carries its ids over when Hermes swaps in a fresh adapter on reconnect.
         self._dedup = MessageDeduplicator(ttl_seconds=3600)
+        self._models: Dict[str, tuple[str, str, str]] = {}  # model choice id → (label, provider, model)
+        self._configured_model: Optional[str] = None  # the choice id of the model Hermes is configured with
+        self._declared: Optional[dict] = None  # the last capabilities Rowboat took
+        self._declared_at = 0.0
         self._deliver_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task] = set()  # frame handlers and turn watchers, cancelled on disconnect
 
@@ -220,8 +330,7 @@ class RowboatAdapter(BasePlatformAdapter):
         mismatch = _agent_mismatch(self._me)
         if mismatch:
             return self._fail("wrong_agent", mismatch, retryable=False)
-        # Spaces may offer Stop: Hermes's own /stop cancels a running turn (see _stop).
-        await self._api("POST", "/v1/agent/capabilities", {"stop": True, "options": []})
+        await self._declare()
         # The first list after a start also picks up what a previous run acknowledged and never finished.
         self._adopting = True
         self._live_task = asyncio.create_task(self._live_loop())
@@ -296,6 +405,28 @@ class RowboatAdapter(BasePlatformAdapter):
         while True:
             await asyncio.sleep(LIST_EVERY_S)
             await self._list()
+            if time.monotonic() - self._declared_at >= OPTIONS_EVERY_S:
+                await self._declare()
+
+    async def _declare(self) -> None:
+        """What Spaces may offer on this agent (spec §8): Stop, which is Hermes's own /stop (see _stop),
+        and Model and Effort, which run one turn (see _apply_options). Sent again only when it changed."""
+        self._declared_at = time.monotonic()
+        try:
+            self._models, self._configured_model = await asyncio.wait_for(asyncio.to_thread(_model_catalog), CATALOG_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 — no catalog: no Model option, or the last one read stays
+            logger.warning("Rowboat: could not read Hermes's model catalog (%s); %s", e or type(e).__name__,
+                           "keeping the last one" if self._models else "offering no Model option")
+        options = []
+        if self._models:
+            choices = [{"id": cid, "label": label} for cid, (label, _p, _m) in self._models.items()]
+            options.append({"type": "select", "key": "model", "label": "Model", "choices": choices})
+        effort = _effort_option()
+        if effort:
+            options.append(effort)
+        body = {"stop": True, "options": options}
+        if body != self._declared and await self._api("POST", "/v1/agent/capabilities", body, quiet=False) is not None:
+            self._declared = body
 
     async def _list(self) -> None:
         listed = await self._api("GET", "/v1/agent/invocations")
@@ -371,10 +502,11 @@ class RowboatAdapter(BasePlatformAdapter):
     # --- invocations in -----------------------------------------------------------
 
     def _runner(self) -> Any:
-        """The gateway runner, for its startup-restore flag. Hermes wraps the message handler it
-        installs (so it has no __self__) but installs the fatal-error handler as a bound method."""
-        for handler in (getattr(self, "_fatal_error_handler", None), getattr(self, "_message_handler", None)):
-            runner = getattr(handler, "__self__", None)
+        """The gateway runner, for its startup-restore flag and its session state. Hermes sets
+        gateway_runner on the adapters it makes; failing that, it wraps the message handler it installs
+        (so it has no __self__) but installs the fatal-error handler as a bound method."""
+        handlers = (getattr(self, "_fatal_error_handler", None), getattr(self, "_message_handler", None))
+        for runner in (getattr(self, "gateway_runner", None), *(getattr(h, "__self__", None) for h in handlers)):
             if runner is not None and hasattr(runner, "_startup_restore_in_progress"):
                 return runner
         return None
@@ -428,6 +560,7 @@ class RowboatAdapter(BasePlatformAdapter):
                 allow_gateway_control=self.owner_commands and bool(author) and author == self._me.get("ownerId"),
                 metadata={"rowboat_invocation": inv_id},
             )
+            turn.applied = await self._apply_options(event, invocation.get("options"))
             await self.handle_message(event)
             self._spawn(self._watch(key, turn))
 
@@ -449,6 +582,104 @@ class RowboatAdapter(BasePlatformAdapter):
             message_id=str(trigger.get("messageId") or ""),
         )
         return space, root, chat_id, source
+
+    # --- options for one turn (Rowboat spec §8, 2026-10-08) -------------------------
+
+    async def _apply_options(self, event: MessageEvent, options: Any) -> Optional[_Applied]:
+        """An invocation's Model and Effort, for its turn alone: Spaces' options are per invocation,
+        and an owner who wants one every time sets a default, which Spaces then sends every time.
+
+        Set on the runner's session state before the message goes in, the way Hermes's own
+        /model --once and /moa set theirs: the turn reads them when it starts, and Hermes puts the
+        session's own model back when the turn ends, on every exit and on /stop. Sending /model and
+        /reasoning as commands was the other way: their confirmations would post in the thread, and
+        /model --once drops --reasoning, while /reasoning has no one-turn form. A command (owner
+        commands on) takes no options: it is not a turn on a model, and /model sets its own."""
+        if not isinstance(options, dict) or not options or event.get_command():
+            return None
+        runner = self._runner()
+        if runner is None or not all(hasattr(runner, name) for name in _RUNNER_STATE):
+            logger.warning("Rowboat: this Hermes has no session overrides for options; the turn runs on its configuration")
+            return None
+        key = runner._session_key_for_source(event.source)
+        override = await self._model_override(runner, event.source, key, options.get("model"))
+        effort = self._effort(options.get("effort"))
+        if override is None and effort is None:
+            return None
+        applied = _Applied(session_key=key)
+        if override is not None:
+            runner._claim_one_turn_restore(key)  # what the session ran before, put back when the turn ends
+            runner._session_state(key).conversation.model_override = override
+            runner._evict_cached_agent(key)
+            applied.model = True
+        if effort is not None:
+            # Read per turn and set on the agent per turn, so the cached agent stays (Hermes: run_turn_runner).
+            applied.effort_before = runner._session_state(key).conversation.reasoning_override
+            runner._set_session_reasoning_override(key, effort)
+            applied.effort = effort
+        return applied
+
+    async def _model_override(self, runner: Any, source: Any, key: str, choice: Any) -> Optional[dict]:
+        """The session model override for a Model choice, shaped as /model writes one; None to change nothing."""
+        if choice is None:
+            return None
+        picked = self._models.get(str(choice))
+        if picked is None:
+            logger.warning("Rowboat: ignoring model %r, which this Hermes does not offer now; the turn runs on its configuration", choice)
+            return None
+        _label, provider, model = picked
+        # The owner's default comes with every invocation: when it is the configured model and nothing
+        # else applies to this thread, the turn runs it anyway, without rebuilding the agent twice.
+        channel = getattr(runner, "_channel_override_for", None)
+        if (
+            str(choice) == self._configured_model and runner._session_model_override(key) is None
+            and (channel is None or channel(source) is None)
+        ):
+            return None
+        try:
+            result = await asyncio.to_thread(_switch, provider, model)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Rowboat: ignoring model %s on %s: %s; the turn runs on its configuration", model, provider, e)
+            return None
+        if not getattr(result, "success", False):
+            logger.warning("Rowboat: ignoring model %s on %s: %s; the turn runs on its configuration",
+                           model, provider, getattr(result, "error_message", "") or "Hermes could not switch to it")
+            return None
+        return {
+            "model": result.new_model, "provider": result.target_provider, "api_key": result.api_key,
+            "base_url": result.base_url, "api_mode": result.api_mode,
+            "request_overrides": dict(result.request_overrides or {}),
+            "capabilities": dict(result.runtime_capabilities or {}),
+        }
+
+    @staticmethod
+    def _effort(value: Any) -> Optional[dict]:
+        """Hermes's reasoning config for an Effort choice, as /reasoning parses one; None to change nothing."""
+        if value is None:
+            return None
+        from hermes_constants import parse_reasoning_effort
+
+        parsed = parse_reasoning_effort(value) if isinstance(value, str) else None
+        if parsed is None:
+            logger.warning("Rowboat: ignoring effort %r, which Hermes does not know; the turn runs on its configuration", value)
+        return parsed
+
+    def _settle_options(self, turn: _Turn) -> None:
+        """Put back what a turn's options set, once, when the turn ends and before anything else runs
+        in its session. Hermes restores the model itself at the end of a turn it ran; this also covers
+        one it turned away before running. Effort is put back only if it is still the turn's own."""
+        applied, turn.applied = turn.applied, None
+        runner = self._runner() if applied else None
+        if runner is None:
+            return
+        try:
+            if applied.model:
+                runner._restore_pending_one_turn_model_override(applied.session_key)
+            state = runner._peek_session_state(applied.session_key)
+            if applied.effort is not None and state is not None and state.conversation.reasoning_override == applied.effort:
+                runner._set_session_reasoning_override(applied.session_key, applied.effort_before)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Rowboat: could not put back the thread's model and effort: %s", e)
 
     async def _adopt(self, invocation: dict) -> None:
         """A turn the previous run acknowledged (spec §8: a restarted connector settles these). Hermes
@@ -492,6 +723,7 @@ class RowboatAdapter(BasePlatformAdapter):
         return bool(lookup and getattr(lookup(key), "resume_pending", False))
 
     async def _finish(self, key: str, turn: _Turn) -> None:
+        self._settle_options(turn)  # if Hermes never ran it, before the next invocation in this thread
         if self._turns.get(key) is turn:
             del self._turns[key]
         if self._resumes_later(key):
@@ -667,6 +899,8 @@ class RowboatAdapter(BasePlatformAdapter):
         turn = self._turns.get(self._event_session_key(event)) if event.source else None
         if turn and event.message_id == turn.message_id:
             turn.outcome = outcome
+            # Before Hermes starts anything it queued for this session (a background job's notice, say).
+            self._settle_options(turn)
         # The base swaps 👀 for ✅/❌ (and only removes it on CANCELLED).
         await super().on_processing_complete(event, outcome)
 

@@ -3,6 +3,8 @@ path against a mocked API, and the platform's own behavior)."""
 
 import asyncio
 import json
+import re
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -579,3 +581,203 @@ async def test_hermes_timing_out_closes_the_approval_as_expired_instead_of_editi
     assert ("POST", "/v1/agent/approvals/AP1/close", {"state": "expired"}) in api.calls
     assert not [p for p in api.paths("POST") if p.endswith("/edit")]
 
+
+
+# --- invocation options: Model and Effort (Rowboat spec §8) ---------------------------
+
+ROWS = [  # what Hermes's /model picker lists (list_picker_providers), current provider first
+    {"slug": "anthropic", "name": "Anthropic", "is_current": True, "models": ["claude-sonnet-5", "claude-opus-5-5"]},
+    {"slug": "openrouter", "name": "OpenRouter", "is_current": False, "models": ["anthropic/claude-opus-5.5", "openai/gpt-6"]},
+]
+EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+
+
+@pytest.fixture
+def runner():
+    """Hermes's own gateway runner, bare, as Hermes's tests use it: the session state is its code."""
+    from gateway.run import GatewayRunner
+
+    r = object.__new__(GatewayRunner)
+    r.evicted = []
+    r._evict_cached_agent = r.evicted.append
+    return r
+
+
+@pytest.fixture
+def catalog(monkeypatch):
+    from hermes_cli.model_switch import ModelSwitchResult
+
+    state = SimpleNamespace(
+        route=SimpleNamespace(current_provider="anthropic", current_model="claude-opus-5-5", current_base_url="",
+                              user_provs=None, custom_provs=None, excluded_provs=[]),
+        rows=[dict(r) for r in ROWS], switched=[], result=None,
+    )
+
+    def switch_model(**kw):
+        state.switched.append(kw)
+        return state.result or ModelSwitchResult(
+            success=True, new_model=kw["raw_input"], target_provider=kw["explicit_provider"], api_key="sk-test",
+            base_url="https://openrouter.ai/api/v1", api_mode="chat_completions",
+        )
+
+    monkeypatch.setattr(mod, "_route", lambda: state.route)
+    monkeypatch.setattr("hermes_cli.model_switch_providers.list_picker_providers",
+                        lambda **kw: [dict(r, models=list(r["models"])) for r in state.rows])
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", switch_model)
+    return state
+
+
+@pytest.fixture
+async def hermes(adapter, runner, catalog):
+    adapter.gateway_runner = runner
+    await adapter._declare()
+    return adapter
+
+
+def declared(api):
+    return [b for m, p, b in api.calls if p == "/v1/agent/capabilities"]
+
+
+async def thread_key(adapter, runner, **over):
+    _space, _root, _chat_id, source = await adapter._where(invocation(**over))
+    return runner._session_key_for_source(source)
+
+
+def reasoning(runner, key):
+    state = runner._peek_session_state(key)
+    return state.conversation.reasoning_override if state else None
+
+
+async def test_declares_stop_and_hermess_models_and_reasoning_levels(hermes, api, catalog):
+    [body] = declared(api)
+    assert body["stop"] is True
+    model, effort = body["options"]
+    assert model == {"type": "select", "key": "model", "label": "Model", "choices": [
+        {"id": "anthropic:claude-opus-5-5", "label": "claude-opus-5-5 · Anthropic"},  # the configured model first
+        {"id": "anthropic:claude-sonnet-5", "label": "claude-sonnet-5 · Anthropic"},
+        {"id": "openrouter:anthropic/claude-opus-5.5", "label": "anthropic/claude-opus-5.5 · OpenRouter"},
+        {"id": "openrouter:openai/gpt-6", "label": "openai/gpt-6 · OpenRouter"},
+    ]}
+    assert (effort["type"], effort["key"], effort["label"]) == ("select", "effort", "Effort")
+    assert [c["id"] for c in effort["choices"]] == EFFORTS
+    assert [c["label"] for c in effort["choices"]] == ["None", "Minimal", "Low", "Medium", "High", "Extra high", "Max", "Ultra"]
+    # Unchanged, nothing is sent again; a change (the owner's /model --global) is declared.
+    await hermes._declare()
+    assert len(declared(api)) == 1
+    catalog.route.current_model = "claude-sonnet-5"
+    await hermes._declare()
+    assert len(declared(api)) == 2 and declared(api)[-1]["options"][0]["choices"][0]["id"] == "anthropic:claude-sonnet-5"
+
+
+async def test_the_declaration_keeps_to_rowboats_limits(adapter, api, catalog):
+    long_name = "A provider with a very long name " * 6
+    catalog.rows = [
+        {"slug": "nous", "name": "Nous Portal", "is_current": False, "models": [f"vendor/model-{i}" for i in range(60)]},
+        {"slug": "openrouter", "name": "OpenRouter", "is_current": False, "models": [f"vendor/other-{i}" for i in range(60)]},
+        {"slug": "custom:lab", "name": long_name, "is_current": True, "models": ["m-1", "x" * 300, "claude-opus-5-5"]},
+    ]
+    catalog.route.current_provider = "custom:lab"
+    await adapter._declare()
+    [body] = declared(api)
+    assert len(body["options"]) <= 8
+    model = body["options"][0]
+    ids = [c["id"] for c in model["choices"]]
+    assert len(ids) == 100 and len(set(ids)) == 100
+    assert ids[:2] == ["custom:lab:claude-opus-5-5", "custom:lab:m-1"]  # every provider shows; the too-long id doesn't
+    assert sum(i.startswith("nous:") for i in ids) == sum(i.startswith("openrouter:") for i in ids) == 49
+    for option in body["options"]:
+        assert re.fullmatch(r"[a-z][a-z0-9_]{0,31}", option["key"]) and 1 <= len(option["label"]) <= 64
+        assert 1 <= len(option["choices"]) <= 100
+        assert all(1 <= len(c["id"]) <= 256 and 1 <= len(c["label"]) <= 128 for c in option["choices"])
+
+
+async def test_without_a_catalog_it_offers_effort_and_keeps_one_it_read(adapter, api, catalog, monkeypatch):
+    def broken(**kw):
+        raise RuntimeError("models.dev unreachable")
+
+    good = mod._model_catalog
+    monkeypatch.setattr(mod, "_model_catalog", lambda: broken())
+    await adapter._declare()
+    assert [o["key"] for o in declared(api)[-1]["options"]] == ["effort"]
+    monkeypatch.setattr(mod, "_model_catalog", good)
+    await adapter._declare()
+    assert [o["key"] for o in declared(api)[-1]["options"]] == ["model", "effort"]
+    monkeypatch.setattr(mod, "_model_catalog", lambda: broken())
+    await adapter._declare()  # a failed read later keeps the Model option Rowboat has
+    assert len(declared(api)) == 2
+
+
+async def test_a_turn_runs_with_its_invocations_model_and_effort(hermes, api, runner, catalog):
+    await hermes._deliver(invocation(options={"model": "openrouter:anthropic/claude-opus-5.5", "effort": "xhigh"}))
+    event = hermes.handled[0]
+    key = runner._session_key_for_source(event.source)
+    # Set before the message went in, where Hermes's /model --once sets its own.
+    override = runner._session_model_override(key)
+    assert (override["model"], override["provider"], override["api_key"]) == ("anthropic/claude-opus-5.5", "openrouter", "sk-test")
+    assert runner._peek_session_state(key).conversation.one_turn_restore == {"had_override": False, "override": None}
+    assert runner._resolve_session_reasoning_config(session_key=key, model="anthropic/claude-opus-5.5") == {"enabled": True, "effort": "xhigh"}
+    assert runner.evicted == [key]
+    assert catalog.switched[0]["explicit_provider"] == "openrouter" and catalog.switched[0]["raw_input"] == "anthropic/claude-opus-5.5"
+    # Hermes's turn finalizer puts the model back; the end of the turn puts the effort back.
+    runner._restore_pending_one_turn_model_override(key, runner._begin_session_run_generation(key))
+    await hermes.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+    assert runner._session_model_override(key) is None and reasoning(runner, key) is None
+    # Nothing about it was said in the thread.
+    assert not [p for p in api.paths("POST") if p.endswith("/messages")]
+
+
+async def test_a_turn_without_options_runs_on_hermess_configuration_even_after_a_pick(hermes, runner):
+    key = await thread_key(hermes, runner)
+    own = {"enabled": True, "effort": "low"}  # the owner's /reasoning low, earlier in this thread
+    runner._set_session_reasoning_override(key, own)
+    await hermes._deliver(invocation(options={"model": "openrouter:openai/gpt-6", "effort": "max"}))
+    assert runner._session_model_override(key)["model"] == "openai/gpt-6" and reasoning(runner, key)["effort"] == "max"
+    await hermes.on_processing_complete(hermes.handled[0], ProcessingOutcome.SUCCESS)
+    hermes._active_sessions.pop(hermes._event_session_key(hermes.handled[0]))  # Hermes releases the session
+    await asyncio.wait_for(asyncio.gather(*list(hermes._tasks)), 2)
+    await hermes._deliver(invocation(id="INV2"))
+    assert len(hermes.handled) == 2
+    assert runner._session_model_override(key) is None and reasoning(runner, key) == own
+
+
+async def test_options_hermes_cannot_use_are_skipped_and_the_turn_runs(hermes, runner, catalog, caplog):
+    from hermes_cli.model_switch import ModelSwitchResult
+
+    await hermes._deliver(invocation(options={"model": "anthropic:claude-gone-4", "effort": "turbo"}))
+    key = runner._session_key_for_source(hermes.handled[0].source)
+    assert runner._session_model_override(key) is None and reasoning(runner, key) is None and runner.evicted == []
+    assert "claude-gone-4" in caplog.text and "turbo" in caplog.text
+    # Offered, but Hermes can no longer switch to it (its credentials removed, say).
+    catalog.result = ModelSwitchResult(success=False, error_message="No credentials for openrouter")
+    await hermes._deliver(invocation(id="INV2", options={"model": "openrouter:openai/gpt-6"},
+                                     conversation={"spaceId": SPACE, "threadRootId": "M9"}))
+    assert len(hermes.handled) == 2
+    assert runner._session_model_override(runner._session_key_for_source(hermes.handled[1].source)) is None
+    assert "No credentials for openrouter" in caplog.text
+
+
+async def test_the_configured_model_as_the_owners_default_changes_nothing(hermes, runner):
+    await hermes._deliver(invocation(options={"model": "anthropic:claude-opus-5-5", "effort": "high"}))
+    key = runner._session_key_for_source(hermes.handled[0].source)
+    assert runner._session_model_override(key) is None and runner.evicted == []  # the cached agent stays
+    assert reasoning(runner, key) == {"enabled": True, "effort": "high"}
+
+
+async def test_a_hermes_command_takes_no_options(hermes, runner):
+    hermes.owner_commands = True
+    body = "[@Hermes](#member:AG1) /model gpt-6 --once"
+    await hermes._deliver(invocation(trigger={"messageId": TRIGGER, "authorId": "ram", "body": body}, options={"model": "openrouter:openai/gpt-6", "effort": "low"}))
+    event = hermes.handled[0]
+    key = runner._session_key_for_source(event.source)
+    assert event.get_command() == "model"
+    assert runner._session_model_override(key) is None and reasoning(runner, key) is None
+
+
+async def test_a_turn_hermes_never_ran_is_put_back_when_its_session_is_released(hermes, api, runner):
+    await hermes._deliver(invocation(options={"model": "openrouter:openai/gpt-6", "effort": "max"}))
+    key = runner._session_key_for_source(hermes.handled[0].source)
+    adapter_key = next(iter(hermes._turns))
+    hermes._active_sessions.pop(adapter_key)  # turned away before it ran: no finalizer, no completion hook
+    await asyncio.wait_for(asyncio.gather(*list(hermes._tasks)), 2)
+    assert runner._session_model_override(key) is None and reasoning(runner, key) is None
+    assert updates(api) == [{"state": "failed", "error": "Hermes did not take the message"}]
