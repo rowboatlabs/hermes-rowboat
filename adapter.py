@@ -561,7 +561,6 @@ class RowboatAdapter(BasePlatformAdapter):
                 channel_context=await self._thread_context(space, root, turn.message_id, author),
                 # Hermes commands only from the agent's owner, and only when the owner turned them on.
                 allow_gateway_control=self.owner_commands and bool(author) and author == self._me.get("ownerId"),
-                metadata={"rowboat_invocation": inv_id},
             )
             turn.applied = await self._apply_options(event, invocation.get("options"))
             await self.handle_message(event)
