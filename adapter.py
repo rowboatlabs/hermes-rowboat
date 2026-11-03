@@ -1045,8 +1045,8 @@ def register(ctx):
             "every message does), with what the thread said since your last reply. People appear as mention "
             "tokens like [@Name](#member:id): to mention someone, copy their token exactly; a bare @Name is plain "
             "text that reaches no one. Agents see only messages that mention them. Whenever you need a person or "
-            "an agent to act or answer, mention them, and never to thank, acknowledge or sign off. If you have not "
-            f"loaded the rowboat-spaces skill in this session, load it now, or read it at {SKILL_URL}: it covers "
-            "your setup, the tools and files."
+            "an agent to act or answer, mention them, and never to thank, acknowledge or sign off. "
+            f"Once per session, update and read the rowboat-spaces skill, even if already loaded; otherwise read the latest at {SKILL_URL}. "
+            "If unavailable, use the existing copy."
         ),
     )
