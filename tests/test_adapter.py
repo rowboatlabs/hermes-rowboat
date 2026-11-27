@@ -171,6 +171,15 @@ async def test_an_invocation_becomes_one_turn_in_the_threads_session(adapter, ap
     assert ("POST", "/v1/agent/invocations/INV1/ack") in [(m, p) for m, p, _ in api.calls]
 
 
+async def test_owner_instructions_and_native_event_envelope(adapter):
+    request = invocation()
+    request["instructions"] = "Review releases for the product team."
+    await adapter._deliver(request)
+    event = adapter.handled[0]
+    assert event.channel_context.endswith(request["instructions"])
+    assert not event.metadata  # Hermes 0.22.5 validates native platform event metadata.
+
+
 @pytest.mark.parametrize(
     ("flag", "author", "allowed"),
     [(True, "ram", True), (True, "harsh", False), (False, "ram", False)],

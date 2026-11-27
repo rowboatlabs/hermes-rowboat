@@ -548,6 +548,9 @@ class RowboatAdapter(BasePlatformAdapter):
             body = str(trigger.get("body") or "")
             media_urls, media_types = await self._media(space, body)
             is_image = [t.startswith("image/") for t in media_types]
+            context = await self._thread_context(space, root, turn.message_id, author)
+            if invocation.get("instructions"):
+                context += "\n\n[Agent instructions from the owner]\n" + invocation["instructions"]
             event = MessageEvent(
                 text=_readable(_naming_attachments(body, space), str(self._me.get("id") or "")),
                 message_type=MessageType.PHOTO if any(is_image) else MessageType.DOCUMENT if media_urls else MessageType.TEXT,
@@ -558,10 +561,9 @@ class RowboatAdapter(BasePlatformAdapter):
                 media_text_inlined=[False] * len(media_urls),
                 source=source,
                 message_id=turn.message_id,
-                channel_context=await self._thread_context(space, root, turn.message_id, author),
+                channel_context=context,
                 # Hermes commands only from the agent's owner, and only when the owner turned them on.
                 allow_gateway_control=self.owner_commands and bool(author) and author == self._me.get("ownerId"),
-                metadata={"rowboat_invocation": inv_id},
             )
             turn.applied = await self._apply_options(event, invocation.get("options"))
             await self.handle_message(event)
